@@ -1,0 +1,65 @@
+{
+  "name": "@majikah/majik-buwiz-client",
+  "type": "module",
+  "description": "A TypeScript invoice management library that combines structured accounting logic with cryptographic envelope for signing, verification, encryption, and secure document workflows.",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
+  "author": "Zelijah",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Majikah/majik-buwiz-client.git"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/jedlsf"
+  },
+  "keywords": [
+    "invoice",
+    "accounting",
+    "billing",
+    "tax",
+    "digital-signature",
+    "content-signing",
+    "post-quantum",
+    "hybrid-cryptography",
+    "ml-dsa-87",
+    "ed25519",
+    "csv-export",
+    "majikah",
+    "majik-buwiz"
+  ],
+  "homepage": "https://github.com/Majikah/majik-buwiz-client#readme",
+  "bugs": {
+    "url": "https://github.com/Majikah/majik-buwiz-client/issues"
+  },
+  "scripts": {
+    "update": "npm install @majikah/majik-key@latest @majikah/majik-signature@latest @majikah/majik-envelope@latest @thezelijah/majik-money@latest",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "package": "npm run build && npm version patch && git push && git push --tags",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@majikah/majik-cjson": "^0.0.3",
+    "@majikah/majik-contact": "^0.0.6",
+    "@majikah/majik-envelope": "^0.1.0",
+    "@majikah/majik-file": "^0.5.1",
+    "@majikah/majik-invoice": "^0.1.1",
+    "@majikah/majik-key": "^0.6.0",
+    "@majikah/majik-key-client": "^0.5.1",
+    "@majikah/majik-signature": "^0.7.1",
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "vitest": "^5.0.2"
+  }
+}
