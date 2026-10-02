@@ -1,7 +1,12 @@
 /**
- * @file majik-invoice-contact.error.ts
- * @description Typed error class for MajikInvoiceContact operations.
+ * @file errors.ts (invoice domain)
+ * Only the contact + group errors change; Manager / Directory / GroupManager
+ * errors stay as-is until phase 2.
  */
+import {
+  MajikContactError,
+  MajikContactGroupError,
+} from "@majikah/majik-contact";
 
 export type MajikInvoiceContactErrorCode =
   | "INVALID_ID"
@@ -21,23 +26,20 @@ export type MajikInvoiceContactErrorCode =
   | "UPDATE_FAILED"
   | "INVALID_TAXPAYER_PROFILE";
 
-export class MajikInvoiceContactError extends Error {
+/** Now `instanceof MajikContactError` is also true for invoice-contact errors. */
+export class MajikInvoiceContactError extends MajikContactError {
   public readonly code: MajikInvoiceContactErrorCode;
   public readonly field?: string;
-  public readonly cause?: unknown;
 
   constructor(
     message: string,
     code: MajikInvoiceContactErrorCode,
     options?: { field?: string; cause?: unknown },
   ) {
-    super(message);
+    super(message, options?.cause);
     this.name = "MajikInvoiceContactError";
     this.code = code;
     this.field = options?.field;
-    this.cause = options?.cause;
-
-    // Maintain correct prototype chain in transpiled environments
     Object.setPrototypeOf(this, new.target.prototype);
   }
 
@@ -51,14 +53,9 @@ export class MajikInvoiceContactError extends Error {
   }
 }
 
-export class MajikInvoiceContactGroupError extends Error {
-  cause?: unknown;
-  constructor(message: string, cause?: unknown) {
-    super(message);
-    this.name = "MajikInvoiceContactGroupError";
-    this.cause = cause;
-  }
-}
+// Groups hold only contact IDs — no invoice-specific behaviour — so the
+// invoice group error is the base error.
+export { MajikContactGroupError as MajikInvoiceContactGroupError };
 
 /* -------------------------------
  * Errors

@@ -28,3 +28,5 @@ export * from "./keystore/adapter-idb";
 export * from "./keystore/adapter-sql";
 export * from "./keystore/adapter-memory";
 export type * from "./keystore/_types";
+
+export * from "./logs";

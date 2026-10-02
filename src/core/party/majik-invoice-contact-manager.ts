@@ -1,7 +1,12 @@
-import { MajikInvoiceContactDirectory } from "./majik-invoice-contact-directory";
-import { MajikInvoiceContactGroupManager } from "./majik-invoice-contact-groups";
-import { MAJIK_API_RESPONSE, MajikMessagePublicKey } from "../types";
-
+import { MAJIK_API_RESPONSE } from "../types";
+import { MajikInvoiceContactManagerError } from "./errors";
+import {
+  ContactManagerQueryMode,
+  MajikInvoiceContactCard,
+  MajikInvoiceContactData,
+  MajikInvoiceContactGroupMeta,
+  MajikInvoiceContactManagerJSON,
+} from "./types";
 import {
   arrayBufferToBase64,
   arrayToBase64,
@@ -10,23 +15,15 @@ import {
 } from "../utils/utilities";
 import { KEY_ALGO } from "../crypto/constants";
 import { gunzipSync, gzipSync } from "fflate";
-
+import { MajikInvoiceContactStorageAdapter } from "../storage/contact-directory/contacts/_types";
+import { MajikInvoiceContactGroupStorageAdapter } from "../storage/contact-directory/groups/_types";
 import { InMemoryContactAdapter } from "../storage/contact-directory/contacts/adapter-memory";
 import { InMemoryContactGroupAdapter } from "../storage/contact-directory/groups/adapter-memory";
+import { MajikKeyAddress } from "@majikah/majik-key";
+import { MajikInvoiceContactDirectory } from "./majik-invoice-contact-directory";
+import { MajikInvoiceContactGroupManager } from "./majik-invoice-contact-groups";
 import { MajikInvoiceContact } from "./majik-invoice-contact";
-import {
-  MajikInvoiceContactGroupStorageAdapter,
-  MajikInvoiceContactStorageAdapter,
-} from "../storage";
 import { MajikInvoiceContactGroup } from "./majik-invoice-contact-group";
-import {
-  ContactManagerQueryMode,
-  MajikInvoiceContactCard,
-  MajikInvoiceContactGroupMeta,
-  MajikInvoiceContactManagerJSON,
-  MajikInvoiceContactMeta,
-} from "./types";
-import { MajikInvoiceContactManagerError } from "./errors";
 import { MajikRecipient } from "@majikah/majik-envelope";
 import { ExpectedSigner } from "@majikah/majik-signature";
 
@@ -124,7 +121,7 @@ export class MajikInvoiceContactManager {
           publicKey = { raw: new Uint8Array(raw) };
         }
 
-        const contact = MajikInvoiceContact.create(
+        const contact = MajikInvoiceContact.createInvoiceContact(
           item.id,
           publicKey as any,
           item.mlKey,
@@ -214,12 +211,38 @@ export class MajikInvoiceContactManager {
    */
   async updateContactMeta(
     id: string,
-    meta: Partial<
-      Omit<MajikInvoiceContactMeta, "createdAt" | "updatedAt" | "blocked">
-    >,
+    meta: Partial<MajikInvoiceContactData["meta"]>,
   ): Promise<MajikInvoiceContact> {
     const contact = this.directory.updateContactMeta(id, meta);
     await this.persistContact(contact);
+    return contact;
+  }
+
+  /**
+   * Blocks a contact and persists both the contact and the Blocked group.
+   */
+  async blockContact(id: string): Promise<MajikInvoiceContact> {
+    const contact = this.directory.blockContact(id);
+    const blocked = this.groupManager.addContactToGroupIfAbsent(
+      this.groupManager.getBlockedGroup().id,
+      id,
+    );
+    await this.persistContact(contact);
+    await this.persistGroup(blocked);
+    return contact;
+  }
+
+  /**
+   * Unblocks a contact and persists both the contact and the Blocked group.
+   */
+  async unblockContact(id: string): Promise<MajikInvoiceContact> {
+    const contact = this.directory.unblockContact(id);
+    const blocked = this.groupManager.removeContactFromGroupIfPresent(
+      this.groupManager.getBlockedGroup().id,
+      id,
+    );
+    await this.persistContact(contact);
+    await this.persistGroup(blocked);
     return contact;
   }
 
@@ -259,10 +282,10 @@ export class MajikInvoiceContactManager {
     return this.directory.getContactByFingerprint(fingerprint);
   }
 
-  async getContactByPublicKeyBase64(
-    publicKeyBase64: string,
+  async getContactByAddress(
+    address: MajikKeyAddress,
   ): Promise<MajikInvoiceContact | undefined> {
-    return await this.directory.getContactByPublicKeyBase64(publicKeyBase64);
+    return await this.directory.getContactByAddress(address);
   }
 
   getContactsByIds(ids: string[], strict = false): MajikInvoiceContact[] {
@@ -300,7 +323,7 @@ export class MajikInvoiceContactManager {
 
     const contacts = await Promise.all(
       uniqueKeys.map(async (key) => {
-        const contact = await this.directory.getContactByPublicKeyBase64(key);
+        const contact = await this.directory.getContactByAddress(key);
 
         if (!contact && strict) {
           throw new MajikInvoiceContactManagerError(
@@ -417,7 +440,7 @@ export class MajikInvoiceContactManager {
   ): Promise<{
     recipients: MajikRecipient[];
     signers: ExpectedSigner[];
-    publicKeys: MajikMessagePublicKey[];
+    publicKeys: MajikKeyAddress[];
   }> {
     if (!input?.length) {
       throw new MajikInvoiceContactManagerError(
@@ -436,7 +459,7 @@ export class MajikInvoiceContactManager {
 
     const recipients: MajikRecipient[] = [];
     const signers: ExpectedSigner[] = [];
-    const publicKeys: MajikMessagePublicKey[] = [];
+    const publicKeys: MajikKeyAddress[] = [];
 
     const seen = new Set<string>();
 
@@ -466,11 +489,11 @@ export class MajikInvoiceContactManager {
       }
 
       // ---- public key validation ----
-      const publicKeyBase64 = await contact.getPublicKeyBase64();
-      if (!publicKeyBase64?.trim()) {
+      const address = await contact.getAddress();
+      if (!address?.trim()) {
         invalidPublicKeys.push(contact.fingerprint);
       } else {
-        publicKeys.push(publicKeyBase64);
+        publicKeys.push(address);
       }
 
       seen.add(contact.fingerprint);
@@ -499,8 +522,8 @@ export class MajikInvoiceContactManager {
     return this.directory.hasFingerprint(fingerprint);
   }
 
-  async hasContactByPublicKeyBase64(publicKeyBase64: string): Promise<boolean> {
-    return this.directory.hasContactByPublicKeyBase64(publicKeyBase64);
+  async hasContactByAddress(address: MajikKeyAddress): Promise<boolean> {
+    return this.directory.hasContactByAddress(address);
   }
 
   listContacts(
@@ -736,17 +759,10 @@ export class MajikInvoiceContactManager {
     const contact = this.getContact(contactId);
     if (!contact) return null;
 
-    let publicKeyBase64: string;
-    const anyPub: any = contact.publicKey;
-    if (anyPub?.raw instanceof Uint8Array) {
-      publicKeyBase64 = arrayBufferToBase64(anyPub.raw.buffer);
-    } else {
-      const raw = await crypto.subtle.exportKey(
-        "raw",
-        contact.publicKey as CryptoKey,
-      );
-      publicKeyBase64 = arrayBufferToBase64(raw);
-    }
+    const anyPub = contact.publicKey;
+    const publicKeyBase64 = arrayBufferToBase64(
+      anyPub.raw.buffer as ArrayBuffer,
+    );
 
     return JSON.stringify(
       {
@@ -757,7 +773,7 @@ export class MajikInvoiceContactManager {
         mlKey: contact.mlKey,
         edPublicKeyBase64: contact.edPublicKeyBase64,
         mlDsaPublicKeyBase64: contact.mlDsaPublicKeyBase64,
-        partyMeta: contact.meta,
+        partyMeta: contact.meta || {},
       } satisfies MajikInvoiceContactCard,
       null,
       2,
@@ -778,24 +794,17 @@ export class MajikInvoiceContactManager {
       }
 
       const rawBuffer = base64ToArrayBuffer(data.publicKey as string);
-      let publicKey: CryptoKey | { raw: Uint8Array };
-      try {
-        publicKey = await crypto.subtle.importKey(
-          "raw",
-          rawBuffer,
-          KEY_ALGO,
-          true,
-          [],
-        );
-      } catch {
-        publicKey = { raw: new Uint8Array(rawBuffer) };
-      }
+
+      const publicKey = { raw: new Uint8Array(rawBuffer) };
 
       const contact = new MajikInvoiceContact({
         id: data.id,
         publicKey,
         fingerprint: data.fingerprint,
-        meta: { label: data.label, ...data.partyMeta },
+        meta: {
+          label: data.label,
+          legalName: data.partyMeta.legalName || data.label,
+        },
         mlKey: data.mlKey,
         edPublicKeyBase64: data.edPublicKeyBase64,
         mlDsaPublicKeyBase64: data.mlDsaPublicKeyBase64,
@@ -827,17 +836,9 @@ export class MajikInvoiceContactManager {
   }
 
   async exportContactCompressed(contact: MajikInvoiceContact): Promise<string> {
-    let publicKeyBase64: string;
     const anyPub: any = contact.publicKey;
-    if (anyPub?.raw instanceof Uint8Array) {
-      publicKeyBase64 = arrayBufferToBase64(anyPub.raw.buffer);
-    } else {
-      const raw = await crypto.subtle.exportKey(
-        "raw",
-        contact.publicKey as CryptoKey,
-      );
-      publicKeyBase64 = arrayBufferToBase64(raw);
-    }
+
+    const publicKeyBase64 = arrayBufferToBase64(anyPub.raw.buffer);
 
     const jsonObj: MajikInvoiceContactCard = {
       id: contact.id,
@@ -847,7 +848,7 @@ export class MajikInvoiceContactManager {
       mlKey: contact.mlKey,
       edPublicKeyBase64: contact.edPublicKeyBase64,
       mlDsaPublicKeyBase64: contact.mlDsaPublicKeyBase64,
-      partyMeta: contact.meta,
+      partyMeta: contact.meta || {},
     };
 
     const compressed = gzipSync(
@@ -866,18 +867,8 @@ export class MajikInvoiceContactManager {
     const data: MajikInvoiceContactCard = JSON.parse(jsonStr);
 
     const rawBuffer = base64ToArrayBuffer(data.publicKey as string);
-    let publicKey: CryptoKey | { raw: Uint8Array };
-    try {
-      publicKey = await crypto.subtle.importKey(
-        "raw",
-        rawBuffer,
-        KEY_ALGO,
-        true,
-        [],
-      );
-    } catch {
-      publicKey = { raw: new Uint8Array(rawBuffer) };
-    }
+
+    const publicKey = { raw: new Uint8Array(rawBuffer) };
 
     if (!data?.id || !publicKey || !data?.fingerprint || !data?.mlKey) {
       throw new Error("Invalid contact JSON");
@@ -887,7 +878,10 @@ export class MajikInvoiceContactManager {
       id: data.id,
       publicKey,
       fingerprint: data.fingerprint,
-      meta: { label: data.label, ...data.partyMeta },
+      meta: {
+        label: data.label,
+        legalName: data.partyMeta.legalName || data.label,
+      },
       mlKey: data.mlKey,
       edPublicKeyBase64: data.edPublicKeyBase64,
       mlDsaPublicKeyBase64: data.mlDsaPublicKeyBase64,

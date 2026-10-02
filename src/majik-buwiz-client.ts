@@ -1,7 +1,5 @@
-import { MajikKey, MajikKeyBackup } from "@majikah/majik-key";
-import { MajikKeyManager } from "./core/crypto/keystore-manager";
-import { MajikKeyStorageAdapter } from "./core/storage/keystore/_types";
-import { InMemoryKeystoreAdapter } from "./core/storage/keystore/adapter-memory";
+import { MajikKey, MajikKeyAddress, MajikKeyBackup } from "@majikah/majik-key";
+
 import { MajikEnvelope, MajikRecipient } from "@majikah/majik-envelope";
 import { MajikCompressedJSON } from "@majikah/majik-cjson";
 import {
@@ -40,7 +38,6 @@ import {
   MajikInvoiceManager,
 } from "./core/invoice/invoice-manager";
 import { MajikInvoiceStorageAdapter } from "./core/storage/invoice/_types";
-import { SQLiteDatabase } from "./core/storage/sqlite/sql-db-manager";
 import { ClientStateManager } from "./core/client-state-manager";
 import {
   ClientStateStorageAdapter,
@@ -72,7 +69,12 @@ import {
 } from "./core/backup/constants";
 import { AppDataSnapshot, ContactManagerSnapshot } from "./core/backup/types";
 
-import { StorageSource } from "./core/storage";
+import {
+  HistoryLogStorageAdapter,
+  InMemoryInvoiceAdapter,
+  StorageSource,
+  UserActivityLogStorageAdapter,
+} from "./core/storage";
 import {
   InMemoryRecurringExpenseItemAdapter,
   RecurringExpenseManager,
@@ -97,17 +99,29 @@ import {
 } from "./core/expenses/types";
 import { ExpenseRecordError } from "./core/expenses/errors";
 import { RecurringExpenseItemStorageAdapter } from "./core/storage/expense/recurring/_types";
+import {
+  MajikKeyClient,
+  MajikKeyClientBaseEvents,
+  MajikKeyClientConfig,
+} from "@majikah/majik-key-client";
+import {
+  AuditActions,
+  CreateHistoryLogOptions,
+  CreateUserActivityLogOptions,
+  HistoryLog,
+  HistoryLogManager,
+  UserActivityLog,
+  UserActivityLogManager,
+} from "./core/log";
+import { arrayToBase64 } from "./core/utils/utilities";
+import { MajikFileIdentity } from "@majikah/majik-file";
 
 // ---------------------------------------------------------------------------
 // Event types
 // ---------------------------------------------------------------------------
 
 type MajikBuwizClientEvents =
-  | "new-account"
-  | "removed-account"
-  | "active-account-change"
-  | "unlock"
-  | "lock"
+  | MajikKeyClientBaseEvents
   | "new-contact"
   | "removed-contact"
   | "updated-contact"
@@ -128,13 +142,13 @@ type MajikBuwizClientEvents =
   | "invoice-export-pdf"
   | "invoice-export-mjki"
   | "invoice-clear"
-  | "restore-backup"
   | "expense-created"
   | "expense-updated"
   | "expense-removed"
   | "expense-actualized"
   | "expense-clear"
-  | "error";
+  | "history-log"
+  | "activity-log";
 
 type EventCallback = (...args: unknown[]) => void;
 
@@ -142,47 +156,31 @@ type EventCallback = (...args: unknown[]) => void;
 // Config
 // ---------------------------------------------------------------------------
 
-export interface MajikBuwizClientConfig {
-  dbSQL?: SQLiteDatabase;
-
-  /**
-   * Shared contact directory.
-   * Pass the same instance used by MajikMessage to keep contacts in sync.
-   */
+export interface MajikBuwizClientConfig extends MajikKeyClientConfig {
+  /** Buwiz-specific client state manager. */
+  clientStateManager?: ClientStateManager;
+  /** Shared contact directory manager. */
   contactManager?: MajikInvoiceContactManager;
 
-  /**
-   * Pre-constructed key manager. If provided, adapters.keys is ignored.
-   * Pass the same instance used by MajikMessage / MajikSignatureClient
-   * to share a single keystore across clients.
-   */
-  keyManager?: MajikKeyManager;
-
   invoiceManager?: MajikInvoiceManager;
-
-  /**
-   * Pre-constructed client state manager. If provided, adapters.clientState
-   * is ignored.
-   */
-  clientStateManager?: ClientStateManager;
-
-  // after invoiceManager?: MajikInvoiceManager;
   expenseManager?: ExpenseManager;
   recurringExpenseManager?: RecurringExpenseManager;
-
-  adapters?: {
+  /** History log manager used for persisted audit/history records. */
+  historyManager?: HistoryLogManager;
+  /** User activity log manager used for persisted activity records. */
+  activityManager?: UserActivityLogManager;
+  /** Storage adapters used when the corresponding manager is not injected. */
+  adapters?: MajikKeyClientConfig["adapters"] & {
+    /** Contact directory storage adapters. */
     contacts?: MajikInvoiceContactManagerAdapters;
-    keys?: MajikKeyStorageAdapter;
+    /** Encrypted stamp storage adapter. */
     invoices?: MajikInvoiceStorageAdapter;
-    /**
-     * Adapter for client-level state (account order, invoice defaults, etc.).
-     * Defaults to IDB_ADAPTER_CLIENT_STATE in browser environments.
-     * Pass InMemoryClientStateAdapter for tests or non-browser runtimes.
-     */
-    clientState?: ClientStateStorageAdapter;
-
     expenses?: ExpenseRecordStorageAdapter;
     recurringExpenses?: RecurringExpenseItemStorageAdapter;
+    /** History log storage adapter. */
+    historyLogs?: HistoryLogStorageAdapter;
+    /** User activity log storage adapter. */
+    userActivityLogs?: UserActivityLogStorageAdapter;
   };
 }
 
@@ -206,37 +204,31 @@ export interface MajikBuwizClientConfig {
  *   or let it default to InMemoryClientStateAdapter.
  */
 
-export class MajikBuwizClient {
-  private readonly _id: string;
-
-  private _db: SQLiteDatabase | null;
-
+export class MajikBuwizClient extends MajikKeyClient<
+  MajikInvoiceContact,
+  MajikInvoiceContactMeta,
+  MajikBuwizClientEvents,
+  ClientStateManager
+> {
   private _contacts: MajikInvoiceContactManager;
-  private _keys: MajikKeyManager;
   private _invoices: MajikInvoiceManager;
-  private _state: ClientStateManager;
 
   private _expenses: ExpenseManager;
   private _recurringExpenses: RecurringExpenseManager;
-
-  /** MajikInvoiceContact instances for accounts this client owns. */
-  private _ownAccounts: Map<string, MajikInvoiceContact> = new Map();
+  /** History log manager used for non-blocking audit/history records. */
+  private _history: HistoryLogManager;
+  /** User activity log manager used for non-blocking activity records. */
+  private _activity: UserActivityLogManager;
 
   /**
-   * Ordered list of own account IDs — head is the active account.
-   * Source of truth is ClientStateManager; this array is the in-memory
-   * working copy kept in sync on every mutation.
+   * Creates a Majik Buwiz client with the supplied managers and storage adapters.
+   *
+   * Use `create()` when the client should be hydrated before first use.
+   *
+   * @param config - Client configuration, including optional managers and storage adapters.
    */
-  private _ownAccountsOrder: string[] = [];
-
-  private _listeners: Map<MajikBuwizClientEvents, EventCallback[]> = new Map();
-
-  private _autosaveOrderTimer: number | null = null;
-
-  constructor(config: MajikBuwizClientConfig = {}) {
-    this._id = crypto.randomUUID();
-
-    this._db = config.dbSQL || null;
+  constructor(config: MajikBuwizClientConfig) {
+    super(config);
 
     this._contacts =
       config.contactManager ??
@@ -246,20 +238,10 @@ export class MajikBuwizClient {
         config.adapters?.contacts,
       );
 
-    this._keys =
-      config.keyManager ??
-      new MajikKeyManager(
-        config.adapters?.keys ?? new InMemoryKeystoreAdapter(),
-      );
-
     this._invoices =
       config.invoiceManager ??
-      new MajikInvoiceManager(config.adapters?.invoices);
-
-    this._state =
-      config.clientStateManager ??
-      new ClientStateManager(
-        config.adapters?.clientState ?? new InMemoryClientStateAdapter(),
+      new MajikInvoiceManager(
+        config.adapters?.invoices ?? new InMemoryInvoiceAdapter(),
       );
 
     this._expenses =
@@ -275,17 +257,21 @@ export class MajikBuwizClient {
           new InMemoryRecurringExpenseItemAdapter(),
       );
 
-    const events: MajikBuwizClientEvents[] = [
-      "new-account",
-      "removed-account",
-      "active-account-change",
-      "unlock",
-      "lock",
+    this._history =
+      config.historyManager ??
+      new HistoryLogManager(config.adapters?.historyLogs);
+
+    this._activity =
+      config.activityManager ??
+      new UserActivityLogManager(config.adapters?.userActivityLogs);
+
+    this._registerEventNames([
       "new-contact",
-      "removed-contact",
       "new-contact-group",
+      "removed-contact",
       "removed-contact-group",
       "contact-group-change",
+      "updated-contact",
       "invoice-created",
       "invoice-updated",
       "invoice-removed",
@@ -298,23 +284,31 @@ export class MajikBuwizClient {
       "invoice-export-csv",
       "invoice-export-pdf",
       "invoice-export-mjki",
-      "restore-backup",
       "invoice-clear",
       "expense-created",
       "expense-updated",
       "expense-removed",
       "expense-actualized",
       "expense-clear",
-      "error",
-    ];
-    events.forEach((e) => this._listeners.set(e, []));
+      "history-log",
+      "activity-log",
+    ]);
+  }
+
+  /**
+   * Override — without this, MajikKeyClient's constructor falls back to
+   * building a plain MajikKeyClientStateManager (ACCOUNT_ORDER only),
+   * and every call to getUserAppPreferences() etc. throws at runtime.
+   * @param adapter - Optional storage adapter used for persisted client state.
+   * @returns The result of the create default state manager operation (`ClientStateManager`).
+   */
+  protected _createDefaultStateManager(
+    adapter?: ClientStateStorageAdapter,
+  ): ClientStateManager {
+    return new ClientStateManager(adapter ?? new InMemoryClientStateAdapter());
   }
 
   // ── Getters ───────────────────────────────────────────────────────────────
-
-  get id(): string {
-    return this._id;
-  }
 
   get invoiceCount(): number {
     return this._invoices.cachedCount;
@@ -322,16 +316,6 @@ export class MajikBuwizClient {
 
   get invoiceManager(): MajikInvoiceManager {
     return this._invoices;
-  }
-
-  /** Expose the key manager so callers can share it with other clients. */
-  get keyManager(): MajikKeyManager {
-    return this._keys;
-  }
-
-  /** Expose the client state manager for direct access if needed. */
-  get stateManager(): ClientStateManager {
-    return this._state;
   }
 
   get expenseManager(): ExpenseManager {
@@ -342,45 +326,131 @@ export class MajikBuwizClient {
     return this._recurringExpenses;
   }
 
+  /**
+   * Returns the history log manager used by this client.
+   * @returns The configured `HistoryLogManager` instance.
+   */
+  get historyManager(): HistoryLogManager {
+    return this._history;
+  }
+
+  /**
+   * Returns the user activity log manager used by this client.
+   * @returns The configured `UserActivityLogManager` instance.
+   */
+  get activityManager(): UserActivityLogManager {
+    return this._activity;
+  }
+
+  // ==========================================================================
+  // ── MajikKeyClient HOOKS ──────────────────────────────────────────────────
+  // ==========================================================================
+
+  /**
+   * Converts a MajikKey into the MajikInvoiceContact representation used by this client.
+   * @param key - MajikKey used as the cryptographic identity for the operation.
+   * @param meta - Optional metadata associated with the contact, account, or group.
+   * @returns The result of the build own account contact operation (`MajikInvoiceContact`).
+   */
+  protected _buildOwnAccountContact(
+    key: MajikKey,
+    meta?: Partial<MajikInvoiceContactMeta>,
+  ): MajikInvoiceContact {
+    const mlKeyBase64 = arrayToBase64(key.mlKemPublicKey);
+
+    return new MajikInvoiceContact({
+      id: key.fingerprint,
+      publicKey: key.publicKey,
+      fingerprint: key.fingerprint,
+      meta: meta,
+      mlKey: mlKeyBase64,
+      edPublicKeyBase64: key.edPublicKey
+        ? arrayToBase64(key.edPublicKey)
+        : undefined,
+      mlDsaPublicKeyBase64: key.mlDsaPublicKey
+        ? arrayToBase64(key.mlDsaPublicKey)
+        : undefined,
+    });
+  }
+
+  /**
+   * Synchronizes a newly registered own account into the shared contact directory.
+   * @param contact - Majik contact record to add, export, or otherwise operate on.
+   * @returns Completes when the operation has finished.
+   */
+  protected async _onAccountRegistered(
+    contact: MajikInvoiceContact,
+  ): Promise<void> {
+    if (!this._contacts.hasContact(contact.id)) {
+      await this._contacts.addContact(contact);
+    }
+  }
+
+  /**
+   * Removes an own account from the shared contact directory.
+   * @param id - Unique identifier of the target entity.
+   * @returns Completes when the operation has finished.
+   */
+  protected async _onAccountRemoved(id: string): Promise<void> {
+    await this._contacts.removeContact(id);
+  }
+
+  /**
+   * Clears Signature-specific key-derived data while preserving audit history.
+   * @returns Completes when the operation has finished.
+   */
+  protected async _onResetKeyData(): Promise<void> {
+    await this._contacts.clear();
+    await this._invoices.clear();
+
+    await this._expenses.clear();
+    await this._recurringExpenses.clear();
+
+    // Deliberately NOT clearing _history/_activity here — see class docblock
+    // note above. Audit trail must survive a key-data reset; record the
+    // reset itself instead of erasing what came before it.
+    await this._recordActivity(undefined, {
+      reference_id: "key-data-reset",
+      action: AuditActions.KEY_DATA_RESET, // ⚠️ verify this member exists
+      metadata: { at: new Date().toISOString() },
+    });
+  }
+
   // ── Hydration ─────────────────────────────────────────────────────────────
 
   /**
    * Load all domains from their adapters and restore client state.
    * Call once on startup.
    *
+   * Order matters: contacts/stamps must be hydrated before own-account
+   * hydration, since _onAccountRegistered() syncs derived accounts into
+   * the contact directory.
+   *
    * ```ts
    * const client = new MajikBuwizClient({ adapters: { keys: idbAdapter, ... } });
    * await client.hydrate();
    * ```
+   * @returns Completes when the operation has finished.
    */
   async hydrate(): Promise<void> {
-    // 1. Keys — load into manager cache
-    await this._keys.hydrate();
-
-    // 2. Contacts + groups
+    await this._hydrateKeys();
     await this._contacts.hydrate();
-
-    const userPreferences = await this.getUserAppPreferences();
-
-    // 3. Invoices
-    await this._hydrateInvoices(userPreferences?.invoices?.autodecrypt);
-
-    // 4. Client state — account order, invoice defaults, etc.
-    await this._state.hydrate();
-
-    // 4b. Expenses + recurring templates
+    await this._invoices.hydrate();
     await this._expenses.hydrate();
     await this._recurringExpenses.hydrate();
-
-    // 5. Own accounts — rebuild from keys loaded in step 1
+    await this._history.hydrate();
+    await this._activity.hydrate();
+    await this._hydrateState();
     await this._hydrateOwnAccounts();
-
-    // 6. Account order — restore from state manager, prune stale IDs
     await this._restoreAccountOrder();
   }
 
   /**
-   * Construct a client and immediately hydrate it.
+   * Constructs a client and immediately hydrates it.
+   *
+   * @typeParam T - Concrete `MajikBuwizClient` subtype returned by the constructor.
+   * @param config - Client configuration, including optional managers and storage adapters.
+   * @returns The result of the create operation (`Promise<T>`).
    */
   static async create<T extends MajikBuwizClient>(
     this: new (config: MajikBuwizClientConfig) => T,
@@ -391,32 +461,246 @@ export class MajikBuwizClient {
     return client;
   }
 
-  // ── Private hydration helpers ─────────────────────────────────────────────
+  // ── Logging (private, non-throwing) ─────────────────────────────────────
 
-  private async _hydrateOwnAccounts(): Promise<void> {
-    const keys = this._keys.list();
+  /**
+   * Lists history log entries associated with the currently active account.
+   * @returns The result of the list history for active account operation (`HistoryLog[]`).
+   */
+  listHistoryForActiveAccount(): HistoryLog[] {
+    const key = this.getActiveAccountKey();
+    if (!key) return [];
+    return this._history.listByFingerprint(key.fingerprint);
+  }
 
-    for (const key of keys) {
-      if (!this._ownAccounts.has(key.id)) {
-        try {
-          const contactData = this._contacts.getContactByFingerprint(
-            key.fingerprint,
+  /**
+   * Lists user activity log entries associated with the currently active account.
+   * @returns The result of the list activity for active account operation (`UserActivityLog[]`).
+   */
+  listActivityForActiveAccount(): UserActivityLog[] {
+    const key = this.getActiveAccountKey();
+    if (!key) return [];
+    return this._activity.listByFingerprint(key.fingerprint);
+  }
+
+  /**
+   * Builds a MajikFileIdentity directly from an already-resolved, in-scope key —
+   * never re-looks-up "the active account." Returns undefined (not throw) when
+   * the key can't support envelope encryption, since logging must never block
+   * the operation it's attached to.
+   * @param key - MajikKey used as the cryptographic identity for the operation.
+   * @returns The result of the identity from key operation (`MajikFileIdentity | undefined`).
+   */
+  private _identityFromKey(key: MajikKey): MajikFileIdentity | undefined {
+    if (key.isLocked) return undefined;
+    const mlKemSecretKey = this._keys.getMlKemSecretKey(key.id);
+    if (!mlKemSecretKey) return undefined;
+    return {
+      publicKey: key.publicKeyBase64,
+      fingerprint: key.fingerprint,
+      mlKemPublicKey: key.mlKemPublicKey,
+      mlKemSecretKey,
+    };
+  }
+
+  /**
+   * Writes a HistoryLog entry. Never throws — a logging failure must not fail
+   * the signing/verification/seal operation it's attached to. `fingerprint` is
+   * the caller's responsibility: pass the fingerprint of whichever key actually
+   * performed the operation, not whatever happens to be the active account.
+   * @param fingerprint - Majik identity fingerprint used to identify the owning cryptographic account.
+   * @param options - Optional operation-specific settings.
+   * @returns The result of the record history operation (`Promise<HistoryLog | null>`).
+   */
+  protected async _recordHistory(
+    fingerprint: string | undefined,
+    options: Omit<CreateHistoryLogOptions, "id" | "timestamp" | "fingerprint">,
+  ): Promise<HistoryLog | null> {
+    try {
+      // 1. Fetch user app preferences
+      const prefs = await this.getUserAppPreferences();
+      const historyPrefs = prefs.general?.history;
+
+      // 2. Abort if the user disabled history logging
+      if (historyPrefs?.enabled === false) {
+        return null;
+      }
+
+      // 3. Create the new log entry
+      const entry = await this._history.create({ ...options, fingerprint });
+      this._emit("history-log", entry);
+
+      // 4. Enforce the maxCount limit
+      const maxCount = historyPrefs?.maxCount ?? 100;
+
+      if (fingerprint && maxCount > 0) {
+        // Fetch all logs for this specific fingerprint
+        const userLogs = this._history.listByFingerprint(fingerprint);
+
+        if (userLogs.length > maxCount) {
+          // Sort logs chronologically (oldest first) based on the timestamp string
+          userLogs.sort(
+            (a, b) =>
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
           );
-          if (contactData) {
-            this._ownAccounts.set(key.id, contactData);
-            if (!this._ownAccountsOrder.includes(key.id)) {
-              this._ownAccountsOrder.push(key.id);
-            }
-          }
-        } catch (err) {
-          console.warn(
-            `MajikBuwizClient: failed to hydrate own account "${key.id}":`,
-            err,
-          );
+
+          // Identify the oldest logs that exceed the maxCount threshold
+          const excessCount = userLogs.length - maxCount;
+          const logsToDelete = userLogs.slice(0, excessCount);
+          const idsToDelete = logsToDelete.map((log) => log.id);
+
+          // Batch delete the old logs from cache and storage adapter
+          await this._history.bulkRemove(idsToDelete);
         }
       }
+
+      return entry;
+    } catch (err) {
+      console.warn("MajikBuwizClient: failed to record history log", err);
+      return null;
     }
   }
+
+  async recordActivity(
+    fingerprint: string | undefined,
+    options: Omit<
+      CreateUserActivityLogOptions,
+      "id" | "timestamp" | "fingerprint"
+    >,
+  ): Promise<UserActivityLog | null> {
+    return this._recordActivity(fingerprint, options);
+  }
+
+  /**
+   * Records a user activity entry without allowing logging failures to interrupt the calling operation.
+   * @param fingerprint - Majik identity fingerprint used to identify the owning cryptographic account.
+   * @param options - Optional operation-specific settings.
+   * @returns The result of the record activity operation (`Promise<UserActivityLog | null>`).
+   */
+  protected async _recordActivity(
+    fingerprint: string | undefined,
+    options: Omit<
+      CreateUserActivityLogOptions,
+      "id" | "timestamp" | "fingerprint"
+    >,
+  ): Promise<UserActivityLog | null> {
+    try {
+      const entry = await this._activity.create({ ...options, fingerprint });
+      this._emit("activity-log", entry);
+
+      // Enforce the hardcoded 5000 log limit
+      const MAX_ACTIVITY_LOGS = 5000;
+
+      if (fingerprint) {
+        const userLogs = this._activity.listByFingerprint(fingerprint);
+
+        if (userLogs.length > MAX_ACTIVITY_LOGS) {
+          // Sort logs chronologically (oldest first)
+          userLogs.sort(
+            (a, b) =>
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+          );
+
+          // Identify and bulk delete the oldest excess logs
+          const excessCount = userLogs.length - MAX_ACTIVITY_LOGS;
+          const logsToDelete = userLogs.slice(0, excessCount);
+          const idsToDelete = logsToDelete.map((log) => log.id);
+
+          await this._activity.bulkRemove(idsToDelete);
+        }
+      }
+
+      return entry;
+    } catch (err) {
+      console.warn("MajikBuwizClient: failed to record activity log", err);
+      return null;
+    }
+  }
+
+  /**
+   * Clears only the history logs for the active account.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async clearHistoryLogsForActiveAccount(): Promise<void> {
+    const key = this.getActiveAccountKey();
+    if (!key) {
+      throw new Error("No active account — call setActiveAccount() first");
+    }
+
+    const fingerprint = key.fingerprint;
+    const historyLogs = this._history.listByFingerprint(fingerprint);
+
+    if (historyLogs.length > 0) {
+      const historyIds = historyLogs.map((log) => log.id);
+      await this._history.bulkRemove(historyIds);
+    }
+  }
+
+  /**
+   * Clears only the activity logs for the active account.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async clearActivityLogsForActiveAccount(): Promise<void> {
+    const key = this.getActiveAccountKey();
+    if (!key) {
+      throw new Error("No active account — call setActiveAccount() first");
+    }
+
+    const fingerprint = key.fingerprint;
+    const activityLogs = this._activity.listByFingerprint(fingerprint);
+
+    if (activityLogs.length > 0) {
+      const activityIds = activityLogs.map((log) => log.id);
+      await this._activity.bulkRemove(activityIds);
+    }
+  }
+
+  /**
+   * Unified method: Clears both history and activity logs for the active account,
+   * then seeds a new log acknowledging the reset.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async restartLogsForActiveAccount(): Promise<void> {
+    const key = this.getActiveAccountKey();
+    if (!key) {
+      throw new Error("No active account — call setActiveAccount() first");
+    }
+
+    // Call the separated clear methods
+    await this.clearHistoryLogsForActiveAccount();
+    await this.clearActivityLogsForActiveAccount();
+
+    // Record the restart action itself as the new initial log
+    await this._recordActivity(key.fingerprint, {
+      reference_id: "logs-restarted",
+      action: AuditActions.KEY_DATA_RESET, // Adjust if you have a specific LOGS_CLEARED action
+      metadata: {
+        at: new Date().toISOString(),
+        message: "History and activity logs restarted",
+      },
+    });
+  }
+
+  /**
+   * Hydrate history + activity logs scoped to the active account's
+   * fingerprint. Mirrors hydrateStampsForActiveAccount() — separate from
+   * the general hydrate() above because it needs an unlocked active
+   * account and is typically called after unlockAccount(), not at startup.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async hydrateLogsForActiveAccount(): Promise<void> {
+    const key = this.getActiveAccountKey();
+    if (!key)
+      throw new Error("No active account — call setActiveAccount() first");
+    await this._history.hydrateForFingerprint(key.fingerprint);
+    await this._activity.hydrateForFingerprint(key.fingerprint);
+  }
+
+  // ── Private hydration helpers ─────────────────────────────────────────────
 
   private async _hydrateInvoices(decrypt = false): Promise<void> {
     const account = this.getActiveAccount();
@@ -450,40 +734,6 @@ export class MajikBuwizClient {
       );
     } catch {
       // Non-fatal — encrypted/raw invoices remain cached
-    }
-  }
-
-  private async _restoreAccountOrder(): Promise<void> {
-    try {
-      const saved = await this._state.getAccountOrder();
-      if (saved) {
-        // Prune IDs that no longer exist, then append any new ones at the tail
-        const valid = saved.filter((id) => this._ownAccounts.has(id));
-        const appended = this._ownAccountsOrder.filter(
-          (id) => !valid.includes(id),
-        );
-        this._ownAccountsOrder = [...valid, ...appended];
-      }
-    } catch {
-      // Non-fatal — order defaults to insertion order from _hydrateOwnAccounts
-    }
-  }
-
-  private _scheduleOrderSave(): void {
-    if (this._autosaveOrderTimer !== null) {
-      window.clearTimeout(this._autosaveOrderTimer);
-    }
-    this._autosaveOrderTimer = window.setTimeout(() => {
-      void this._persistAccountOrder();
-      this._autosaveOrderTimer = null;
-    }, 300) as unknown as number;
-  }
-
-  private async _persistAccountOrder(): Promise<void> {
-    try {
-      await this._state.setAccountOrder(this._ownAccountsOrder);
-    } catch (err) {
-      console.warn("MajikBuwizClient: failed to persist account order:", err);
     }
   }
 
@@ -605,188 +855,6 @@ export class MajikBuwizClient {
     return appPreferences.invoices.autodecrypt ?? false;
   }
 
-  // ==========================================================================
-  // ── ACCOUNT MANAGEMENT ────────────────────────────────────────────────────
-  // ==========================================================================
-
-  async generateMnemonic(strength: 128 | 256 = 128): Promise<string> {
-    return await MajikKeyManager.generateMnemonic(strength);
-  }
-
-  async createAccount(
-    mnemonic: string,
-    passphrase: string,
-    label?: string,
-    party?: Partial<MajikInvoiceContactMeta>,
-  ): Promise<{ id: string; fingerprint: string; backup: string }> {
-    try {
-      const key = await MajikKey.create(mnemonic, passphrase, label);
-      await this._keys.save(key);
-      const contact = key.toContact();
-
-      const invoiceContact = MajikInvoiceContact.create(
-        contact.id,
-        contact.publicKey,
-        contact.mlKey,
-        contact.fingerprint,
-        party,
-        contact.edPublicKeyBase64,
-        contact.mlDsaPublicKeyBase64,
-      );
-      this._registerOwnAccount(invoiceContact);
-      this._emit("new-account", contact);
-      return { id: key.id, fingerprint: key.fingerprint, backup: key.backup };
-    } catch (err) {
-      this._emit("error", err, { context: "createAccount" });
-      throw err;
-    }
-  }
-
-  async importAccountFromMnemonicBackup(
-    backupBase64: string,
-    mnemonic: string,
-    passphrase: string,
-    label?: string,
-    party?: Partial<MajikInvoiceContactMeta>,
-  ): Promise<{ id: string; fingerprint: string }> {
-    try {
-      const key = await this._keys.importFromMnemonicBackup(
-        backupBase64,
-        mnemonic,
-        passphrase,
-        label,
-      );
-      if (this.getOwnAccountById(key.id)) {
-        throw new Error("Account with the same ID already exists");
-      }
-      const contact = key.toContact();
-
-      const invoiceContact = MajikInvoiceContact.create(
-        contact.id,
-        contact.publicKey,
-        contact.mlKey,
-        contact.fingerprint,
-        party,
-        contact.edPublicKeyBase64,
-        contact.mlDsaPublicKeyBase64,
-      );
-      this._registerOwnAccount(invoiceContact);
-      this._emit("new-account", contact);
-      return { id: key.id, fingerprint: key.fingerprint };
-    } catch (err) {
-      this._emit("error", err, { context: "importAccountFromMnemonicBackup" });
-      throw err;
-    }
-  }
-
-  async replaceAccountFromMnemonicBackup(
-    backupBase64: string,
-    mnemonic: string,
-    passphrase: string,
-    label?: string,
-    party?: Partial<MajikInvoiceContactMeta>,
-  ): Promise<{ id: string; fingerprint: string }> {
-    try {
-      const currentAccount = this.getActiveAccountKey();
-      const currentContact = this.getActiveAccount();
-
-      const finalLabel = label?.trim() || currentContact?.meta?.label;
-      const finalMeta: Partial<MajikInvoiceContactMeta> = {
-        ...currentContact?.meta,
-        ...party,
-      };
-
-      // 1. Import first (no mutation yet)
-      const key = await this._keys.importFromMnemonicBackup(
-        backupBase64,
-        mnemonic,
-        passphrase,
-        finalLabel,
-      );
-
-      // 2. Prevent duplicate (except self-replace)
-      if (this.getOwnAccountById(key.id) && key.id !== currentAccount?.id) {
-        throw new Error("Account with the same ID already exists");
-      }
-
-      if (key.id === currentAccount?.id) {
-        throw new Error("Can't replace an existing account with itself");
-      }
-
-      const contact = key.toContact();
-
-      // 3. Remove old account if different
-      if (currentAccount && currentAccount.id !== key.id) {
-        await this.removeOwnAccount(currentAccount.id);
-      }
-
-      // 4. Register new account
-      const invoiceContact = MajikInvoiceContact.create(
-        contact.id,
-        contact.publicKey,
-        contact.mlKey,
-        contact.fingerprint,
-        finalMeta,
-        contact.edPublicKeyBase64,
-        contact.mlDsaPublicKeyBase64,
-      );
-      this._registerOwnAccount(invoiceContact);
-
-      // 5. Set active
-      await this.setActiveAccount(contact.id, true);
-
-      this._emit("new-account", contact);
-
-      return { id: key.id, fingerprint: key.fingerprint };
-    } catch (err) {
-      this._emit("error", err, {
-        context: "replaceAccountFromMnemonicBackup",
-      });
-      throw err;
-    }
-  }
-
-  async exportAccountMnemonicBackup(
-    id: string,
-    mnemonic: string,
-  ): Promise<string> {
-    return this._keys.exportMnemonicBackup(id, mnemonic);
-  }
-
-  addOwnAccount(account: MajikInvoiceContact): void {
-    this._registerOwnAccount(account);
-    this._emit("new-account", account);
-  }
-
-  async removeOwnAccount(id: string): Promise<boolean> {
-    if (!this._ownAccounts.has(id)) return false;
-    this._ownAccounts.delete(id);
-    const idx = this._ownAccountsOrder.indexOf(id);
-    if (idx > -1) this._ownAccountsOrder.splice(idx, 1);
-    await this._contacts.removeContact(id);
-    await this._keys.delete(id);
-    this._scheduleOrderSave();
-    this._emit("removed-account", id);
-    return true;
-  }
-
-  getOwnAccountById(id: string): MajikInvoiceContact | undefined {
-    return this._ownAccounts.get(id);
-  }
-
-  getActiveAccount(): MajikInvoiceContact | null {
-    if (!this._ownAccountsOrder.length) return null;
-    return this._ownAccounts.get(this._ownAccountsOrder[0]) ?? null;
-  }
-
-  getActiveAccountKey(): MajikKey | null {
-    if (!this._ownAccountsOrder.length) return null;
-
-    const activeKey = this._keys.get(this._ownAccountsOrder[0]);
-    if (!activeKey) return null;
-    return activeKey;
-  }
-
   async exportActiveAccountKey(seed: string[]): Promise<Blob | null> {
     if (!this._ownAccountsOrder.length) return null;
 
@@ -808,145 +876,618 @@ export class MajikBuwizClient {
     return zipBlob;
   }
 
-  isAccountActive(id: string): boolean {
-    return this._ownAccounts.has(id) && this._ownAccountsOrder[0] === id;
-  }
+  // ==========================================================================
+  // ── ACCOUNT MANAGEMENT (overrides / additions on top of MajikKeyClient) ──
+  // ==========================================================================
 
-  async setActiveAccount(id: string, bypassIdentity = false): Promise<boolean> {
-    if (!this._ownAccounts.has(id)) return false;
-    if (!bypassIdentity) {
-      try {
-        await this.ensureIdentityUnlocked(id);
-      } catch {
-        return false;
-      }
-    }
-    const previousActive = this.getActiveAccount()?.id;
-    const index = this._ownAccountsOrder.indexOf(id);
-    if (index > -1) this._ownAccountsOrder.splice(index, 1);
-    this._ownAccountsOrder.unshift(id);
-    this._scheduleOrderSave();
-    if (previousActive !== id) {
-      this._emit(
-        "active-account-change",
-        this.getActiveAccount(),
-        previousActive,
-      );
-    }
-    return true;
-  }
-
-  listOwnAccounts(): MajikInvoiceContact[] {
-    return this._ownAccountsOrder
-      .map((id) => this._ownAccounts.get(id))
-      .filter((c): c is MajikInvoiceContact => !!c);
-  }
-
-  async unlockAccount(id: string, passphrase: string): Promise<void> {
-    try {
-      await this._keys.unlock(id, passphrase);
-      this._emit("unlock", id);
-    } catch (err) {
-      this._emit("error", err, { context: "unlockAccount", id });
-      throw err;
-    }
-  }
-
-  lockAccount(id: string): void {
-    this._keys.lock(id);
-    this._emit("lock", id);
-  }
-
-  lockAllAccounts(): void {
-    this._keys.lockAll();
-    for (const id of this._ownAccountsOrder) this._emit("lock", id);
-  }
-
-  async verifyPassphrase(id: string, passphrase: string): Promise<boolean> {
-    return this._keys.isPassphraseValid(id, passphrase);
-  }
-
-  async updatePassphrase(
+  /**
+   * Update the metadata (e.g., label) of an owned account.
+   * This updates both the contact directory and the local ownAccounts cache.
+   * @param id - Unique identifier of the target entity.
+   * @param meta - Optional metadata associated with the contact, account, or group.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async updateOwnAccountMeta(
     id: string,
-    currentPassphrase: string,
-    newPassphrase: string,
+    meta: Partial<MajikInvoiceContactMeta>,
   ): Promise<void> {
-    try {
-      await this._keys.updatePassphrase(id, currentPassphrase, newPassphrase);
-    } catch (err) {
-      this._emit("error", err, { context: "updatePassphrase", id });
-      throw err;
+    if (!this._ownAccounts.has(id)) {
+      throw new Error(`Account not found in own accounts: "${id}"`);
+    }
+
+    // 1. Update the contact record in the shared directory
+    await this._contacts.updateContactMeta(id, meta);
+    if (meta.label && meta.label.trim()) {
+      await this.keyManager.updateLabel(id, meta.label);
+    }
+
+    // 2. Fetch the updated contact and sync the local _ownAccounts map
+    const updatedContact = this._contacts.getContact(id);
+    if (updatedContact) {
+      this._ownAccounts.set(id, updatedContact);
     }
   }
 
-  async replacePassphrase(
-    backup: string,
-    mnemonic: string,
-    newPassphrase: string,
-    id: string,
-    label?: string,
-  ): Promise<MajikKey> {
-    try {
-      return await this._keys.replacePassphrase(
-        backup,
-        mnemonic,
-        newPassphrase,
-        id,
-        label,
-      );
-    } catch (err) {
-      this._emit("error", err, { context: "replacePassphrase", id });
-      throw err;
-    }
-  }
-
-  accountHasSigningKeys(id: string): boolean {
-    return this._keys.get(id)?.hasSigningKeys ?? false;
-  }
-
-  async ensureIdentityUnlocked(
-    id: string,
-    promptFn?: (id: string) => string | Promise<string>,
-  ): Promise<CryptoKey | { raw: Uint8Array }> {
-    return this._keys.ensureUnlocked(id, promptFn);
-  }
-
-  async isPassphraseValid(passphrase: string, id?: string): Promise<boolean> {
-    const target = id ? this.getOwnAccountById(id) : this.getActiveAccount();
-    if (!target) return false;
-    return this._keys.isPassphraseValid(target.id, passphrase);
+  /**
+   * Checks whether an identity with the supplied fingerprint exists in the key manager.
+   * @param fingerprint - Majik identity fingerprint used to identify the owning cryptographic account.
+   * @returns The result of the has own identity operation (`Promise<boolean>`).
+   */
+  async hasOwnIdentity(fingerprint: string): Promise<boolean> {
+    return this.keyManager.has(fingerprint);
   }
 
   // ==========================================================================
   // ── CONTACT MANAGEMENT ────────────────────────────────────────────────────
   // ==========================================================================
 
+  /**
+   * Returns a contact by its unique identifier.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the get contact by i d operation (`MajikInvoiceContact | null`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
   getContactByID(id: string): MajikInvoiceContact | null {
     if (!id?.trim()) throw new Error("Invalid contact ID");
     return this._contacts.getContact(id) ?? null;
   }
 
-  async getContactByPublicKey(
-    publicKeyBase64: string,
-  ): Promise<MajikInvoiceContact | null> {
-    if (!publicKeyBase64?.trim()) throw new Error("Invalid public key");
-    return (
-      (await this._contacts.getContactByPublicKeyBase64(publicKeyBase64)) ??
-      null
-    );
+  /**
+   * Checks whether a contact with the supplied identifier exists.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the has contact operation (`boolean`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  hasContact(id: string): boolean {
+    if (!id?.trim()) throw new Error("Invalid contact ID");
+    return this._contacts.hasContact(id);
   }
 
+  /**
+   * Checks whether a contact exists for the supplied public-key address.
+   * @param publicKey - Public-key address or key material used to identify or resolve a signer.
+   * @returns The result of the has contact by address operation (`Promise<boolean>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async hasContactByAddress(publicKey: MajikKeyAddress): Promise<boolean> {
+    if (!publicKey?.trim())
+      throw new Error("Invalid contact public key address");
+    return await this._contacts.hasContactByAddress(publicKey);
+  }
+
+  /**
+   * Returns a contact associated with the supplied public-key address.
+   * @param address - Public-key address used to identify a contact or signer.
+   * @returns The result of the get contact by address operation (`Promise<MajikInvoiceContact | null>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async getContactByAddress(
+    address: MajikKeyAddress,
+  ): Promise<MajikInvoiceContact | null> {
+    if (!address?.trim()) throw new Error("Invalid public key address");
+    return (await this._contacts.getContactByAddress(address)) ?? null;
+  }
+
+  /**
+   * Returns contacts matching the supplied identifiers.
+   * @param ids - Collection of entity identifiers to resolve.
+   * @param strict - Whether missing or unmatched entities should be treated as an error instead of being skipped.
+   * @returns The result of the get contacts by i d operation (`MajikInvoiceContact[]`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
   getContactsByID(ids: string[], strict = false): MajikInvoiceContact[] {
     if (!ids?.length) throw new Error("At least 1 id is required");
     return this._contacts.getContactsByIds(ids, strict);
   }
 
+  /**
+   * Returns contacts matching the supplied public keys.
+   * @param publicKeys - Collection of public keys used to resolve contacts or verify signatures.
+   * @returns The result of the get contacts by public key operation (`Promise<MajikInvoiceContact[]>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
   async getContactsByPublicKey(
     publicKeys: string[],
   ): Promise<MajikInvoiceContact[]> {
     if (!publicKeys?.length)
       throw new Error("At least 1 public key is required");
     return await this._contacts.getContactsByPublicKeys(publicKeys);
+  }
+
+  /**
+   * Exports a contact as a JSON string suitable for storage or transport.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the export contact as j s o n operation (`Promise<string | null>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async exportContactAsJSON(id: string): Promise<string | null> {
+    if (!id?.trim()) throw new Error("Invalid contact ID");
+    return this._contacts.exportContactAsJSON(id);
+  }
+
+  /**
+   * Exports a contact using the contact manager string representation.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the export contact as string operation (`Promise<string | null>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async exportContactAsString(id: string): Promise<string | null> {
+    if (!id?.trim()) throw new Error("Invalid contact ID");
+    return this._contacts.exportContactAsString(id);
+  }
+
+  /**
+   * Imports a contact from its JSON representation.
+   * @param jsonStr - Serialized contact JSON string.
+   * @returns The result of the import contact from j s o n operation (`Promise<MAJIK_API_RESPONSE>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async importContactFromJSON(jsonStr: string): Promise<MAJIK_API_RESPONSE> {
+    if (!jsonStr?.trim()) throw new Error("Invalid contact JSON");
+    return this._contacts.importContactFromJSON(jsonStr);
+  }
+
+  /**
+   * Imports a contact from the contact manager string representation.
+   * @param base64Str - Base64-encoded serialized contact or backup value.
+   * @returns The result of the import contact from string operation (`Promise<MAJIK_API_RESPONSE>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async importContactFromString(
+    base64Str: string,
+  ): Promise<MAJIK_API_RESPONSE> {
+    if (!base64Str?.trim()) throw new Error("Invalid contact string");
+
+    const response = await this._contacts.importContactFromString(base64Str);
+
+    if (response.success) {
+      this._emit("new-contact", response.data);
+    } else {
+      this._emit("error", response.message);
+    }
+
+    return response;
+  }
+
+  /**
+   * Exports a contact as a compressed, portable base64 representation.
+   * @param contact - Majik contact record to add, export, or otherwise operate on.
+   * @returns The result of the export contact compressed operation (`Promise<string>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async exportContactCompressed(contact: MajikInvoiceContact): Promise<string> {
+    if (!contact?.id?.trim()) throw new Error("Invalid contact");
+    return this._contacts.exportContactCompressed(contact);
+  }
+
+  /**
+   * Imports a contact from a compressed base64 representation.
+   * @param base64Str - Base64-encoded serialized contact or backup value.
+   * @returns The result of the import contact compressed operation (`Promise<MajikInvoiceContact>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async importContactCompressed(
+    base64Str: string,
+  ): Promise<MajikInvoiceContact> {
+    if (!base64Str?.trim()) throw new Error("Invalid contact string");
+    return this._contacts.importContactCompressed(base64Str);
+  }
+
+  /**
+   * Adds a contact to the shared contact directory and records the corresponding activity event.
+   * @param contact - Majik contact record to add, export, or otherwise operate on.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async addContact(contact: MajikInvoiceContact): Promise<void> {
+    if (
+      !contact?.id ||
+      !contact?.publicKey ||
+      !contact?.fingerprint ||
+      !contact?.mlKey
+    ) {
+      throw new Error("Invalid contact — missing required fields");
+    }
+    await this._contacts.addContact(contact);
+
+    this._recordActivity(this.getActiveAccountKey()?.fingerprint, {
+      reference_id: contact.id,
+      action: AuditActions.CONTACT_ADDED, // ⚠️ verify member name
+      metadata: { contactFingerprint: contact.fingerprint },
+    });
+
+    this._emit("new-contact", contact);
+  }
+
+  /**
+   * Removes a contact from the shared contact directory.
+   * @param id - Unique identifier of the target entity.
+   * @returns Completes when the operation has finished.
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  async removeContact(id: string): Promise<void> {
+    const result = await this._contacts.removeContact(id);
+    if (!result.success) throw new Error(result.message);
+
+    this._recordActivity(this.getActiveAccountKey()?.fingerprint, {
+      reference_id: id,
+      action: AuditActions.CONTACT_DELETED, // ⚠️
+    });
+
+    this._emit("removed-contact", id);
+  }
+
+  /**
+   * Lists contacts, optionally including the client’s own accounts and restricting results to Majikah contacts.
+   * @param includeOwnAccounts - Whether the returned contact collection should include the client’s own accounts.
+   * @param majikahOnly - Whether to restrict results to Majikah contacts.
+   * @returns The result of the list contacts operation (`MajikInvoiceContact[]`).
+   */
+  listContacts(
+    includeOwnAccounts = false,
+    majikahOnly: boolean = false,
+  ): MajikInvoiceContact[] {
+    const contacts = this._contacts.listContacts(true, majikahOnly);
+    if (includeOwnAccounts) return contacts;
+    const ownIds = new Set(this.listOwnAccounts().map((a) => a.id));
+    return contacts.filter((c) => !ownIds.has(c.id));
+  }
+
+  /**
+   * Updates metadata for a contact in the shared directory.
+   * @param id - Unique identifier of the target entity.
+   * @param meta - Optional metadata associated with the contact, account, or group.
+   * @returns Completes when the operation has finished.
+   */
+  async updateContactMeta(
+    id: string,
+    meta: Partial<MajikInvoiceContactMeta>,
+  ): Promise<void> {
+    await this._contacts.updateContactMeta(id, meta);
+  }
+
+  /**
+   * Creates a contact group and optionally populates it with initial members.
+   * @param id - Unique identifier of the target entity.
+   * @param name - Human-readable name for the new or existing asset.
+   * @param meta - Optional metadata associated with the contact, account, or group.
+   * @param initialMemberIds - Optional contact identifiers to add when the group is created.
+   * @returns The result of the create group operation (`Promise<this>`).
+   */
+  async createGroup(
+    id: string,
+    name: string,
+    meta?: Partial<Omit<MajikInvoiceContactGroupMeta, "name">>,
+    initialMemberIds?: string[],
+  ): Promise<this> {
+    const newGroup = await this._contacts.createGroup(
+      id,
+      name,
+      meta,
+      initialMemberIds,
+    );
+    this._emit("new-contact-group", newGroup);
+    return this;
+  }
+
+  /**
+   * Adds an existing contact group to the directory.
+   * @param group - Value used by the add group operation.
+   * @returns The result of the add group operation (`Promise<this>`).
+   */
+  async addGroup(group: MajikInvoiceContactGroup): Promise<this> {
+    await this._contacts.addGroup(group);
+    this._emit("new-contact-group", group);
+    return this;
+  }
+
+  /**
+   * Removes a contact group from the directory.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the remove group operation (`Promise<MAJIK_API_RESPONSE>`).
+   */
+  async removeGroup(id: string): Promise<MAJIK_API_RESPONSE> {
+    const response = await this._contacts.removeGroup(id);
+    this._emit(
+      "removed-contact-group",
+      response.data as MajikInvoiceContactGroup,
+    );
+    return response;
+  }
+
+  /**
+   * Returns a contact group by identifier, or undefined when it is not present.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the get contact group operation (`MajikInvoiceContactGroup | undefined`).
+   */
+  getContactGroup(id: string): MajikInvoiceContactGroup | undefined {
+    return this._contacts.getGroup(id);
+  }
+
+  /**
+   * Returns a contact group by identifier and throws when it cannot be found.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the get group or throw operation (`MajikInvoiceContactGroup`).
+   */
+  getGroupOrThrow(id: string): MajikInvoiceContactGroup {
+    return this._contacts.getGroupOrThrow(id);
+  }
+
+  /**
+   * Checks whether a contact group exists.
+   * @param id - Unique identifier of the target entity.
+   * @returns The result of the has group operation (`boolean`).
+   */
+  hasGroup(id: string): boolean {
+    return this._contacts.hasGroup(id);
+  }
+
+  /**
+   * Lists contact groups with optional inclusion of system groups and name sorting.
+   * @param includeSystem - Whether system-managed groups should be included.
+   * @param sortedByName - Whether groups should be sorted by display name.
+   * @returns The result of the list contact groups operation (`MajikInvoiceContactGroup[]`).
+   */
+  listContactGroups(
+    includeSystem = true,
+    sortedByName = false,
+  ): MajikInvoiceContactGroup[] {
+    return this._contacts.listGroups(includeSystem, sortedByName);
+  }
+
+  /**
+   * Lists user-created contact groups.
+   * @param sortedByName - Whether groups should be sorted by display name.
+   * @returns The result of the list user groups operation (`MajikInvoiceContactGroup[]`).
+   */
+  listUserGroups(sortedByName = true): MajikInvoiceContactGroup[] {
+    return this._contacts.listGroups(false, sortedByName);
+  }
+
+  /**
+   * Lists system-managed contact groups.
+   * @returns The result of the list system groups operation (`MajikInvoiceContactGroup[]`).
+   */
+  listSystemGroups(): MajikInvoiceContactGroup[] {
+    return this._contacts.listGroups(true).filter((g) => g.isSystem);
+  }
+
+  /**
+   * Updates mutable metadata for a contact group.
+   * @param id - Unique identifier of the target entity.
+   * @param meta - Optional metadata associated with the contact, account, or group.
+   * @returns The result of the update group meta operation (`Promise<this>`).
+   */
+  async updateGroupMeta(
+    id: string,
+    meta: Partial<
+      Pick<MajikInvoiceContactGroupMeta, "name" | "description" | "color">
+    >,
+  ): Promise<this> {
+    const updatedGroup = await this._contacts.updateGroupMeta(id, meta);
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Adds one contact to a contact group.
+   * @param groupID - Identifier of the target contact group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the add contact to group operation (`Promise<this>`).
+   */
+  async addContactToGroup(groupID: string, contactID: string): Promise<this> {
+    const updatedGroup = await this._contacts.addContactToGroup(
+      groupID,
+      contactID,
+    );
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Adds multiple contacts to a contact group.
+   * @param groupID - Identifier of the target contact group.
+   * @param contactIds - Collection of contact identifiers to add to the group.
+   * @returns The result of the add contacts to group operation (`Promise<this>`).
+   */
+  async addContactsToGroup(
+    groupID: string,
+    contactIds: string[],
+  ): Promise<this> {
+    const updatedGroup = await this._contacts.addContactsToGroup(
+      groupID,
+      contactIds,
+    );
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Removes one contact from a contact group.
+   * @param groupID - Identifier of the target contact group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the remove contact from group operation (`Promise<this>`).
+   */
+  async removeContactFromGroup(
+    groupID: string,
+    contactID: string,
+  ): Promise<this> {
+    const updatedGroup = await this._contacts.removeContactFromGroup(
+      groupID,
+      contactID,
+    );
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Moves a contact from one group to another.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @param fromGroupId - Identifier of the source contact group.
+   * @param toGroupId - Identifier of the destination contact group.
+   * @returns The result of the move contact between groups operation (`Promise<this>`).
+   */
+  async moveContactBetweenGroups(
+    contactID: string,
+    fromGroupId: string,
+    toGroupId: string,
+  ): Promise<this> {
+    const updatedGroup = await this._contacts.moveContactBetweenGroups(
+      contactID,
+      fromGroupId,
+      toGroupId,
+    );
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Returns contacts belonging to a contact group.
+   * @param groupID - Identifier of the target contact group.
+   * @returns The result of the get contacts in group operation (`MajikInvoiceContact[]`).
+   */
+  getContactsInGroup(groupID: string): MajikInvoiceContact[] {
+    return this._contacts.getContactsInGroup(groupID);
+  }
+
+  /**
+   * Returns contacts belonging to a contact group in sorted order.
+   * @param groupID - Identifier of the target contact group.
+   * @returns The result of the get contacts in group sorted operation (`MajikInvoiceContact[]`).
+   */
+  getContactsInGroupSorted(groupID: string): MajikInvoiceContact[] {
+    return this._contacts.getContactsInGroupSorted(groupID);
+  }
+
+  /**
+   * Checks whether a contact belongs to a contact group.
+   * @param groupID - Identifier of the target contact group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the is contact in group operation (`boolean`).
+   */
+  isContactInGroup(groupID: string, contactID: string): boolean {
+    return this._contacts.isContactInGroup(groupID, contactID);
+  }
+
+  /**
+   * Returns all groups containing the specified contact.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the get groups for contact operation (`MajikInvoiceContactGroup[]`).
+   */
+  getGroupsForContact(contactID: string): MajikInvoiceContactGroup[] {
+    return this._contacts.getGroupsForContact(contactID);
+  }
+
+  /**
+   * Returns the identifiers of groups containing the specified contact.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the get group ids for contact operation (`string[]`).
+   */
+  getGroupIdsForContact(contactID: string): string[] {
+    return this._contacts.getGroupIdsForContact(contactID);
+  }
+
+  /**
+   * Adds a contact to the built-in favorites group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the add contact to favorites operation (`Promise<this>`).
+   */
+  async addContactToFavorites(contactID: string): Promise<this> {
+    const updatedGroup = await this._contacts.addToFavorites(contactID);
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Removes a contact from the built-in favorites group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the remove contact from favorites operation (`Promise<this>`).
+   */
+  async removeContactFromFavorites(contactID: string): Promise<this> {
+    const updatedGroup = await this._contacts.removeFromFavorites(contactID);
+    this._emit("contact-group-change", updatedGroup);
+    return this;
+  }
+
+  /**
+   * Checks whether a contact is in the favorites group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the is contact favorite operation (`boolean`).
+   */
+  isContactFavorite(contactID: string): boolean {
+    return this._contacts.isFavorite(contactID);
+  }
+  /**
+   * Checks whether a contact is in the blocked group.
+   * @param contactID - Contact identifier used to resolve the member being updated.
+   * @returns The result of the is contact blocked operation (`boolean`).
+   */
+  isContactBlocked(contactID: string): boolean {
+    return this._contacts.isContactBlocked(contactID);
+  }
+  /**
+   * Returns the built-in favorites group.
+   * @returns The result of the get favorites group operation (`MajikInvoiceContactGroup`).
+   */
+  getFavoritesGroup(): MajikInvoiceContactGroup {
+    return this._contacts.getFavoritesGroup();
+  }
+  /**
+   * Returns the built-in blocked group.
+   * @returns The result of the get blocked group operation (`MajikInvoiceContactGroup`).
+   */
+  getBlockedGroup(): MajikInvoiceContactGroup {
+    return this._contacts.getBlockedGroup();
+  }
+
+  /**
+   * Returns all contacts in the favorites group.
+   * @returns The result of the get favorite contacts operation (`MajikInvoiceContact[]`).
+   */
+  getFavoriteContacts(): MajikInvoiceContact[] {
+    return this._contacts.getContactsInGroup(
+      this._contacts.getFavoritesGroup().id,
+    );
+  }
+
+  /**
+   * Returns all contacts in the blocked group.
+   * @returns The result of the get blocked contacts operation (`MajikInvoiceContact[]`).
+   */
+  getBlockedContacts(): MajikInvoiceContact[] {
+    return this._contacts.getContactsInGroup(
+      this._contacts.getBlockedGroup().id,
+    );
+  }
+
+  /**
+   * Clears the shared contact directory and returns the client for chaining.
+   * @returns The result of the clear directory operation (`Promise<this>`).
+   */
+  async clearDirectory(): Promise<this> {
+    await this._contacts.clear();
+    return this;
+  }
+
+  /**
+   * Resolves a human-readable signer label from owned accounts or the contact directory.
+   * @param signerId - Signer identifier whose display label should be resolved.
+   * @returns The result of the resolve signer label operation (`string`).
+   */
+  resolveSignerLabel(signerId: string): string {
+    const ownAccount = this._ownAccounts.get(signerId);
+    if (ownAccount?.meta?.label) return ownAccount.meta.label;
+    const contact = this._contacts.getContact(signerId);
+    if (contact?.meta?.label) return contact.meta.label;
+    return `${signerId.slice(0, 16)}…`;
+  }
+
+  async getContactByPublicKey(
+    publicKeyBase64: string,
+  ): Promise<MajikInvoiceContact | null> {
+    if (!publicKeyBase64?.trim()) throw new Error("Invalid public key");
+    return (await this._contacts.getContactByAddress(publicKeyBase64)) ?? null;
   }
 
   async getMajikRecipientsByPublicKey(
@@ -1011,83 +1552,6 @@ export class MajikBuwizClient {
     return await this._contacts.getMajikahInvoiceData("id", ids, strict);
   }
 
-  async exportContactAsJSON(id: string): Promise<string | null> {
-    if (!id?.trim()) throw new Error("Invalid contact ID");
-    return this._contacts.exportContactAsJSON(id);
-  }
-
-  async exportContactAsString(id: string): Promise<string | null> {
-    if (!id?.trim()) throw new Error("Invalid contact ID");
-    return this._contacts.exportContactAsString(id);
-  }
-
-  async importContactFromJSON(jsonStr: string): Promise<MAJIK_API_RESPONSE> {
-    if (!jsonStr?.trim()) throw new Error("Invalid contact JSON");
-    return this._contacts.importContactFromJSON(jsonStr);
-  }
-
-  async importContactFromString(
-    base64Str: string,
-  ): Promise<MAJIK_API_RESPONSE> {
-    if (!base64Str?.trim()) throw new Error("Invalid contact string");
-
-    const response = await this._contacts.importContactFromString(base64Str);
-
-    if (response.success) {
-      this._emit("new-contact", response.data);
-    } else {
-      this._emit("error", response.message);
-    }
-
-    return response;
-  }
-
-  async exportContactCompressed(contact: MajikInvoiceContact): Promise<string> {
-    if (!contact?.id?.trim()) throw new Error("Invalid contact");
-    return this._contacts.exportContactCompressed(contact);
-  }
-
-  async importContactCompressed(
-    base64Str: string,
-  ): Promise<MajikInvoiceContact> {
-    if (!base64Str?.trim()) throw new Error("Invalid contact string");
-    return this._contacts.importContactCompressed(base64Str);
-  }
-
-  async addContact(contact: MajikInvoiceContact): Promise<void> {
-    if (
-      !contact?.id ||
-      !contact?.publicKey ||
-      !contact?.fingerprint ||
-      !contact?.mlKey
-    ) {
-      throw new Error("Invalid contact — missing required fields");
-    }
-    await this._contacts.addContact(contact);
-    this._emit("new-contact", contact);
-  }
-
-  async removeContact(id: string): Promise<void> {
-    const result = await this._contacts.removeContact(id);
-    if (!result.success) throw new Error(result.message);
-    this._emit("removed-contact", id);
-  }
-
-  listContacts(includeOwnAccounts = false): MajikInvoiceContact[] {
-    const contacts = this._contacts.listContacts(true);
-    if (includeOwnAccounts) return contacts;
-    const ownIds = new Set(this.listOwnAccounts().map((a) => a.id));
-    return contacts.filter((c) => !ownIds.has(c.id));
-  }
-
-  async updateContactMeta(
-    id: string,
-    meta: Partial<MajikInvoiceContactMeta>,
-  ): Promise<void> {
-    const updatedContact = await this._contacts.updateContactMeta(id, meta);
-    this._emit("updated-contact", updatedContact);
-  }
-
   async updateActiveAccountMeta(
     meta: Partial<MajikInvoiceContactMeta>,
   ): Promise<void> {
@@ -1098,192 +1562,6 @@ export class MajikBuwizClient {
       meta,
     );
     this._emit("updated-contact", updatedContact);
-  }
-
-  async createGroup(
-    id: string,
-    name: string,
-    meta?: Partial<Omit<MajikInvoiceContactGroupMeta, "name">>,
-    initialMemberIds?: string[],
-  ): Promise<this> {
-    const newGroup = await this._contacts.createGroup(
-      id,
-      name,
-      meta,
-      initialMemberIds,
-    );
-    this._emit("new-contact-group", newGroup);
-    return this;
-  }
-
-  async addGroup(group: MajikInvoiceContactGroup): Promise<this> {
-    await this._contacts.addGroup(group);
-    this._emit("new-contact-group", group);
-    return this;
-  }
-
-  async removeGroup(id: string): Promise<MAJIK_API_RESPONSE> {
-    const response = await this._contacts.removeGroup(id);
-    this._emit(
-      "removed-contact-group",
-      response.data as MajikInvoiceContactGroup,
-    );
-    return response;
-  }
-
-  getContactGroup(id: string): MajikInvoiceContactGroup | undefined {
-    return this._contacts.getGroup(id);
-  }
-
-  getGroupOrThrow(id: string): MajikInvoiceContactGroup {
-    return this._contacts.getGroupOrThrow(id);
-  }
-
-  hasGroup(id: string): boolean {
-    return this._contacts.hasGroup(id);
-  }
-
-  listContactGroups(
-    includeSystem = true,
-    sortedByName = false,
-  ): MajikInvoiceContactGroup[] {
-    return this._contacts.listGroups(includeSystem, sortedByName);
-  }
-
-  listUserGroups(sortedByName = true): MajikInvoiceContactGroup[] {
-    return this._contacts.listGroups(false, sortedByName);
-  }
-
-  listSystemGroups(): MajikInvoiceContactGroup[] {
-    return this._contacts.listGroups(true).filter((g) => g.isSystem);
-  }
-
-  async updateGroupMeta(
-    id: string,
-    meta: Partial<
-      Pick<MajikInvoiceContactGroupMeta, "name" | "description" | "color">
-    >,
-  ): Promise<this> {
-    const updatedGroup = await this._contacts.updateGroupMeta(id, meta);
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  async addContactToGroup(groupID: string, contactID: string): Promise<this> {
-    const updatedGroup = await this._contacts.addContactToGroup(
-      groupID,
-      contactID,
-    );
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  async addContactsToGroup(
-    groupID: string,
-    contactIds: string[],
-  ): Promise<this> {
-    const updatedGroup = await this._contacts.addContactsToGroup(
-      groupID,
-      contactIds,
-    );
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  async removeContactFromGroup(
-    groupID: string,
-    contactID: string,
-  ): Promise<this> {
-    const updatedGroup = await this._contacts.removeContactFromGroup(
-      groupID,
-      contactID,
-    );
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  async moveContactBetweenGroups(
-    contactID: string,
-    fromGroupId: string,
-    toGroupId: string,
-  ): Promise<this> {
-    const updatedGroup = await this._contacts.moveContactBetweenGroups(
-      contactID,
-      fromGroupId,
-      toGroupId,
-    );
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  getContactsInGroup(groupID: string): MajikInvoiceContact[] {
-    return this._contacts.getContactsInGroup(groupID);
-  }
-
-  getContactsInGroupSorted(groupID: string): MajikInvoiceContact[] {
-    return this._contacts.getContactsInGroupSorted(groupID);
-  }
-
-  isContactInGroup(groupID: string, contactID: string): boolean {
-    return this._contacts.isContactInGroup(groupID, contactID);
-  }
-
-  getGroupsForContact(contactID: string): MajikInvoiceContactGroup[] {
-    return this._contacts.getGroupsForContact(contactID);
-  }
-
-  getGroupIdsForContact(contactID: string): string[] {
-    return this._contacts.getGroupIdsForContact(contactID);
-  }
-
-  async addContactToFavorites(contactID: string): Promise<this> {
-    const updatedGroup = await this._contacts.addToFavorites(contactID);
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  async removeContactFromFavorites(contactID: string): Promise<this> {
-    const updatedGroup = await this._contacts.removeFromFavorites(contactID);
-    this._emit("contact-group-change", updatedGroup);
-    return this;
-  }
-
-  isContactFavorite(contactID: string): boolean {
-    return this._contacts.isFavorite(contactID);
-  }
-  isContactBlocked(contactID: string): boolean {
-    return this._contacts.isContactBlocked(contactID);
-  }
-  getFavoritesGroup(): MajikInvoiceContactGroup {
-    return this._contacts.getFavoritesGroup();
-  }
-  getBlockedGroup(): MajikInvoiceContactGroup {
-    return this._contacts.getBlockedGroup();
-  }
-
-  getFavoriteContacts(): MajikInvoiceContact[] {
-    return this._contacts.getContactsInGroup(
-      this._contacts.getFavoritesGroup().id,
-    );
-  }
-
-  getBlockedContacts(): MajikInvoiceContact[] {
-    return this._contacts.getContactsInGroup(
-      this._contacts.getBlockedGroup().id,
-    );
-  }
-
-  async clearDirectory(): Promise<this> {
-    await this._contacts.clear();
-    return this;
-  }
-
-  resolveSignerLabel(signerId: string): string {
-    const ownAccount = this._ownAccounts.get(signerId);
-    if (ownAccount?.meta?.label) return ownAccount.meta.label;
-    const contact = this._contacts.getContact(signerId);
-    if (contact?.meta?.label) return contact.meta.label;
-    return `${signerId.slice(0, 16)}…`;
   }
 
   // ==========================================================================
@@ -2895,42 +3173,6 @@ export class MajikBuwizClient {
   }
 
   // ==========================================================================
-  // ── RESET ─────────────────────────────────────────────────────────────────
-  // ==========================================================================
-
-  /**
-   * Wipe all data from every adapter and reset in-memory state.
-   * The client remains usable — call hydrate() or add new accounts after reset.
-   */
-  async resetData(): Promise<void> {
-    try {
-      await this._keys.adapter.clear();
-      await this._contacts.clear();
-      await this._invoices.clear();
-      await this._state.clear();
-
-      await this._expenses.clear();
-      await this._recurringExpenses.clear();
-
-      if (this._db) {
-        await this._db.vacuum();
-        await this._db.optimize();
-      }
-
-      this._ownAccounts.clear();
-      this._ownAccountsOrder = [];
-
-      this._keys = new MajikKeyManager(this._keys.adapter);
-
-      this._emit("active-account-change", null);
-    } catch (err) {
-      throw new Error(
-        `Failed to reset data: ${err instanceof Error ? err.message : err}`,
-      );
-    }
-  }
-
-  // ==========================================================================
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────
   // ==========================================================================
 
@@ -2993,29 +3235,5 @@ export class MajikBuwizClient {
       );
     }
     return key;
-  }
-
-  private _registerOwnAccount(contact: MajikInvoiceContact): void {
-    if (!this._ownAccounts.has(contact.id)) {
-      this._ownAccounts.set(contact.id, contact);
-      this._ownAccountsOrder.push(contact.id);
-      this._scheduleOrderSave();
-    }
-    if (!this._contacts.hasContact(contact.id)) {
-      this._contacts.addContact(contact);
-    }
-    if (!this.getActiveAccount()) {
-      void this.setActiveAccount(contact.id, true);
-    }
-  }
-
-  private _emit(event: MajikBuwizClientEvents, ...args: unknown[]): void {
-    this._listeners.get(event)?.forEach((cb) => {
-      try {
-        cb(...args);
-      } catch (err) {
-        console.warn(`MajikBuwizClient event handler error (${event}):`, err);
-      }
-    });
   }
 }

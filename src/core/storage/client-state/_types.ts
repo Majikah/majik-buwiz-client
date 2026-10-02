@@ -74,9 +74,20 @@ export interface InvoiceDefaults {
  * User-configured app-wide preferences.
  */
 export interface UserAppPreferences {
+  general: GeneralPreferences;
   invoices: InvoicePreferences;
   dashboard: DashboardPreferences;
   privacy: PrivacyPreferences;
+  security: SecurityPreferences;
+}
+
+export interface GeneralPreferences {
+  history?: HistoryPreferences;
+}
+
+export interface HistoryPreferences {
+  enabled?: boolean;
+  maxCount?: number;
 }
 
 export interface InvoicePreferences {
@@ -89,6 +100,16 @@ export interface DashboardPreferences {
 
 export interface PrivacyPreferences {
   shareAnalytics?: boolean;
+}
+
+export interface SecurityPreferences {
+  key?: KeyPreferences;
+}
+
+export interface KeyPreferences {
+  autoLockOnMinimize?: boolean;
+  autoLockInterval?: number;
+  onetimeUnlock?: boolean;
 }
 
 // ---------------------------------------------------------------------------

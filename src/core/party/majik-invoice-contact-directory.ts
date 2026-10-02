@@ -1,13 +1,15 @@
 import { KEY_ALGO } from "../crypto/constants";
-import { MajikInvoiceContact } from "./majik-invoice-contact";
-import {
-  MajikInvoiceContactDirectoryData,
-  MajikInvoiceContactMeta,
-  SerializedMajikInvoiceContact,
-} from "./types";
 import { MAJIK_API_RESPONSE } from "../types";
 import { base64ToArrayBuffer } from "../utils/utilities";
+
+import { MajikKeyAddress } from "@majikah/majik-key";
+import { MajikInvoiceContact } from "./majik-invoice-contact";
 import { MajikInvoiceContactDirectoryError } from "./errors";
+import {
+  MajikInvoiceContactData,
+  MajikInvoiceContactDirectoryData,
+  SerializedMajikInvoiceContact,
+} from "./types";
 
 /* -------------------------------
  * MajikInvoiceContactDirectory Class
@@ -37,9 +39,6 @@ export class MajikInvoiceContactDirectory {
       throw new MajikInvoiceContactDirectoryError("Invalid contact");
     }
 
-    if (!(contact instanceof MajikInvoiceContact)) {
-      throw new MajikInvoiceContactDirectoryError("Invalid contact instance");
-    }
     if (this.contacts.has(contact.id)) {
       throw new MajikInvoiceContactDirectoryError(
         `Contact with id "${contact.id}" already exists`,
@@ -75,16 +74,16 @@ export class MajikInvoiceContactDirectory {
 
   updateContactMeta(
     id: string,
-    meta: Partial<
-      Omit<MajikInvoiceContactMeta, "createdAt" | "updatedAt" | "blocked">
-    >,
+    meta: Partial<MajikInvoiceContactData["meta"]>,
   ): MajikInvoiceContact {
     const contact = this.getContact(id);
     if (!contact)
       throw new MajikInvoiceContactDirectoryError("Contact not found");
 
     if (meta) {
-      contact.updateMetadata(meta);
+      meta.label && contact.updateLabel(meta.label);
+      meta.notes && contact.updateNotes(meta.notes);
+      meta.blocked !== undefined && contact.setBlocked(meta.blocked);
     }
 
     return contact;
@@ -111,18 +110,18 @@ export class MajikInvoiceContactDirectory {
    * Get contact by public key (base64)
    * Uses MajikInvoiceContact.getPublicKeyBase64() for canonical comparison
    */
-  async getContactByPublicKeyBase64(
-    publicKeyBase64: string,
+  async getContactByAddress(
+    address: MajikKeyAddress,
   ): Promise<MajikInvoiceContact | undefined> {
-    if (!publicKeyBase64 || typeof publicKeyBase64 !== "string") {
+    if (!address || typeof address !== "string") {
       throw new MajikInvoiceContactDirectoryError(
-        "Public key must be a non-empty base64 string",
+        "Public key must be a non-empty base64 MajikKeyAddress",
       );
     }
 
     for (const contact of this.contacts.values()) {
-      const contactKey = await contact.getPublicKeyBase64();
-      if (contactKey === publicKeyBase64) {
+      const contactKey = await contact.getAddress();
+      if (contactKey === address) {
         return contact;
       }
     }
@@ -153,6 +152,24 @@ export class MajikInvoiceContactDirectory {
     return contacts;
   }
 
+  blockContact(id: string): MajikInvoiceContact {
+    const contact = this.getContact(id);
+    if (!contact)
+      throw new MajikInvoiceContactDirectoryError(
+        `Contact with id "${id}" not found for block`,
+      );
+    return contact.block();
+  }
+
+  unblockContact(id: string): MajikInvoiceContact {
+    const contact = this.getContact(id);
+    if (!contact)
+      throw new MajikInvoiceContactDirectoryError(
+        `Contact with id "${id}" not found for unblock`,
+      );
+    return contact.unblock();
+  }
+
   hasContact(id: string): boolean {
     return this.contacts.has(id);
   }
@@ -160,14 +177,14 @@ export class MajikInvoiceContactDirectory {
   /**
    * Checks if a contact exists by their public key (base64)
    */
-  async hasContactByPublicKeyBase64(publicKeyBase64: string): Promise<boolean> {
-    if (!publicKeyBase64 || typeof publicKeyBase64 !== "string") {
+  async hasContactByAddress(address: MajikKeyAddress): Promise<boolean> {
+    if (!address || typeof address !== "string") {
       throw new MajikInvoiceContactDirectoryError(
-        "Public key must be a non-empty base64 string",
+        "Public key must be a non-empty base64 MajikKeyAddress",
       );
     }
 
-    const contact = await this.getContactByPublicKeyBase64(publicKeyBase64);
+    const contact = await this.getContactByAddress(address);
     return contact !== undefined;
   }
 
@@ -236,7 +253,7 @@ export class MajikInvoiceContactDirectory {
         publicKey = { raw: new Uint8Array(raw) };
       }
 
-      const contact = MajikInvoiceContact.create(
+      const contact = MajikInvoiceContact.createInvoiceContact(
         item.id,
         publicKey as any,
         item.mlKey,
