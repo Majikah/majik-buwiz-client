@@ -108,7 +108,7 @@ export class MajikInvoiceContactDirectory {
 
   /**
    * Get contact by public key (base64)
-   * Uses MajikInvoiceContact.getPublicKeyBase64() for canonical comparison
+   * Uses MajikInvoiceContact.getAddress() for canonical comparison
    */
   async getContactByAddress(
     address: MajikKeyAddress,
