@@ -876,6 +876,33 @@ export class MajikBuwizClient extends MajikKeyClient<
     return zipBlob;
   }
 
+  /**
+   * Checks whether keys are automatically locked when the application is minimized.
+   * @returns The result of the is auto lock on minimize enabled operation (`Promise<boolean>`).
+   */
+  async isAutoLockOnMinimizeEnabled(): Promise<boolean> {
+    const appPreferences = await this.stateManager.getUserAppPreferences();
+    return appPreferences.security?.key?.autoLockOnMinimize ?? false;
+  }
+
+  /**
+   * Returns the configured automatic key-lock interval, when one is configured.
+   * @returns The result of the auto lock interval operation (`Promise<number | undefined>`).
+   */
+  async autoLockInterval(): Promise<number | undefined> {
+    const appPreferences = await this.stateManager.getUserAppPreferences();
+    return appPreferences.security?.key?.autoLockInterval;
+  }
+
+  /**
+   * Checks whether one-time unlock behavior is enabled.
+   * @returns The result of the is onetime unlock enabled operation (`Promise<boolean>`).
+   */
+  async isOnetimeUnlockEnabled(): Promise<boolean> {
+    const appPreferences = await this.stateManager.getUserAppPreferences();
+    return appPreferences.security?.key?.onetimeUnlock ?? true;
+  }
+
   // ==========================================================================
   // ── ACCOUNT MANAGEMENT (overrides / additions on top of MajikKeyClient) ──
   // ==========================================================================
