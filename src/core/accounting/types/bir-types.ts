@@ -11,14 +11,14 @@
  */
 
 import { ExpenseRecord } from "../../expenses/expense-record";
+import { ISODateString } from "../../types";
 import { ResolvedInvoice } from "./invoice-types";
 
 // =============================================================================
 // ── ISO PRIMITIVES (re-declared locally to avoid coupling to invoice types) ──
 // =============================================================================
 
-/** ISO 8601 date — YYYY-MM-DD */
-export type ISODateString = string;
+
 
 /** ISO 8601 datetime — YYYY-MM-DDTHH:mm:ssZ */
 export type ISODateTimeString = string;

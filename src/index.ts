@@ -13,5 +13,6 @@ export * from "./core/utils/utilities";
 export * from "./core/storage";
 
 export * from "./core/identity";
+export * from "./core/accounting";
 
 export type { ContactManagerSnapshot } from "./core/backup/types";

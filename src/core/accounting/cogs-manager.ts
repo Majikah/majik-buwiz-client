@@ -16,7 +16,8 @@
  * Feeds into Item 29 (Cost of Sales/Service) on Form 1701Q/1701A.
  */
 
-import type { CurrencyCode, ISODateString } from "./types/bir-types";
+import { ISODateString } from "../types";
+import type { CurrencyCode } from "./types/bir-types";
 
 // =============================================================================
 // ── SKU DEFINITION ─────────────────────────────────────────────────────────────
