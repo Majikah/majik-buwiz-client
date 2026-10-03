@@ -361,21 +361,7 @@ export class MajikBuwizClient extends MajikKeyClient<
     key: MajikKey,
     meta?: Partial<MajikInvoiceContactMeta>,
   ): MajikInvoiceContact {
-    const mlKeyBase64 = arrayToBase64(key.mlKemPublicKey);
-
-    return new MajikInvoiceContact({
-      id: key.fingerprint,
-      publicKey: key.publicKey,
-      fingerprint: key.fingerprint,
-      meta: meta,
-      mlKey: mlKeyBase64,
-      edPublicKeyBase64: key.edPublicKey
-        ? arrayToBase64(key.edPublicKey)
-        : undefined,
-      mlDsaPublicKeyBase64: key.mlDsaPublicKey
-        ? arrayToBase64(key.mlDsaPublicKey)
-        : undefined,
-    });
+    return key.toContact(MajikInvoiceContact, meta);
   }
 
   /**
