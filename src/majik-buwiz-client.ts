@@ -361,7 +361,8 @@ export class MajikBuwizClient extends MajikKeyClient<
     key: MajikKey,
     meta?: Partial<MajikInvoiceContactMeta>,
   ): MajikInvoiceContact {
-    return key.toContact(MajikInvoiceContact, meta);
+    const contact = this._contacts.getContact(key.fingerprint);
+    return key.toContact(MajikInvoiceContact, { ...contact?.meta, ...meta });
   }
 
   /**
