@@ -17,6 +17,7 @@ import type {
 } from "@majikah/majik-invoice";
 import { MajikStorageAdapter } from "../storage-adapter";
 import { ExpenseRecord } from "../../expenses/expense-record";
+import { BASE_CLIENT_STATE_KEYS } from "@majikah/majik-key-client";
 
 // ---------------------------------------------------------------------------
 // Storage entry — the unit that adapters read and write
@@ -36,7 +37,7 @@ export interface ClientStateEntry {
 // ---------------------------------------------------------------------------
 
 export const CLIENT_STATE_KEYS = {
-  ACCOUNT_ORDER: "user_account_order",
+  ...BASE_CLIENT_STATE_KEYS,
   INVOICE_DEFAULTS: "invoice_defaults",
   INVOICE_TABLE_COLUMNS: "invoice_table_columns",
   EXPENSE_TABLE_COLUMNS: "expense_table_columns",

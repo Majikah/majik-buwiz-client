@@ -1,29 +1,10 @@
+import {
+  MAJIKAH_SQL_SCHEMA_MAJIK_CLIENT_STATE,
+  MAJIKAH_SQL_SCHEMA_MAJIK_KEYS,
+} from "@majikah/majik-key-client";
 import { MAJIKAH_SQL_TABLES } from "../sql-db-tables";
 import { MajikahSQLSchema } from "./_types";
 import { buildSchemaSQL } from "./_utils";
-
-export const MAJIKAH_SQL_SCHEMA_MAJIK_CLIENT_STATE: MajikahSQLSchema = `
-CREATE TABLE IF NOT EXISTS ${MAJIKAH_SQL_TABLES.MAJIK_CLIENT_STATE} (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT DEFAULT (datetime('now'))
-);
-`;
-
-export const MAJIKAH_SQL_SCHEMA_MAJIK_KEYS: MajikahSQLSchema = `
-CREATE TABLE IF NOT EXISTS ${MAJIKAH_SQL_TABLES.MAJIK_KEYS} (
-  id TEXT PRIMARY KEY,
-  json TEXT NOT NULL,
-  timestamp TEXT NOT NULL,
-  public_key TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_majik_keys_timestamp
-ON ${MAJIKAH_SQL_TABLES.MAJIK_KEYS}(timestamp);
-
-CREATE INDEX IF NOT EXISTS idx_majik_keys_public_key
-ON ${MAJIKAH_SQL_TABLES.MAJIK_KEYS}(public_key);
-`;
 
 export const MAJIKAH_SQL_SCHEMA_MAJIK_INVOICES: MajikahSQLSchema = `
 CREATE TABLE IF NOT EXISTS ${MAJIKAH_SQL_TABLES.MAJIK_INVOICES} (

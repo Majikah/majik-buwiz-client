@@ -267,16 +267,19 @@ export class MajikBuwizClient extends MajikKeyClient<
 
     this._registerEventNames([
       "new-contact",
-      "new-contact-group",
       "removed-contact",
+      "updated-contact",
+
+      "new-contact-group",
       "removed-contact-group",
       "contact-group-change",
-      "updated-contact",
+
       "invoice-created",
       "invoice-updated",
       "invoice-removed",
       "invoice-signed",
       "invoice-sealed",
+      "invoice-closed",
       "invoice-verified",
       "invoice-decrypted",
       "invoice-reissued",
@@ -285,11 +288,13 @@ export class MajikBuwizClient extends MajikKeyClient<
       "invoice-export-pdf",
       "invoice-export-mjki",
       "invoice-clear",
+
       "expense-created",
       "expense-updated",
       "expense-removed",
       "expense-actualized",
       "expense-clear",
+
       "history-log",
       "activity-log",
     ]);
