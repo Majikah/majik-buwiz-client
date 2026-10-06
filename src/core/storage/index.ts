@@ -4,6 +4,11 @@ export * from "./sqlite/sql-db-manager";
 export * from "./storage-adapter";
 export * from "./idb-adapter";
 
+export {
+  type SQLiteTransport,
+  WorkerSQLiteTransport,
+} from "./sqlite/sqlite-transport";
+
 export * from "./client-state/adapter-idb";
 export * from "./client-state/adapter-sql";
 export * from "./client-state/adapter-memory";
@@ -23,6 +28,16 @@ export * from "./invoice/adapter-idb";
 export * from "./invoice/adapter-sql";
 export * from "./invoice/adapter-memory";
 export type * from "./invoice/_types";
+
+export * from "./expense/expense-records/adapter-idb";
+export * from "./expense/expense-records/adapter-sql";
+export * from "./expense/expense-records/adapter-memory";
+export type * from "./expense/expense-records/_types";
+
+export * from "./expense/recurring/adapter-idb";
+export * from "./expense/recurring/adapter-sql";
+export * from "./expense/recurring/adapter-memory";
+export type * from "./expense/recurring/_types";
 
 export * from "./keystore/adapter-idb";
 export * from "./keystore/adapter-sql";

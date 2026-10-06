@@ -1,9 +1,8 @@
 export * from "./majik-buwiz-client";
 export type * from "./core/types";
-export * from "./core/party/majik-invoice-contact-manager";
-export * from "./core/party/majik-invoice-contact-directory";
-export * from "./core/party/majik-invoice-contact-groups";
-export * from "./core/party/enums";
+export * from "./core/party";
+
+export * from "./core/client-state-manager";
 
 export * from "./core/crypto/constants";
 
@@ -28,3 +27,5 @@ export * from "./core/expenses/recurring/constants";
 export type * from "./core/expenses/recurring/types";
 
 export type { ContactManagerSnapshot } from "./core/backup/types";
+
+export * from "./core/log";

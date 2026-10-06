@@ -17,6 +17,22 @@
     "./accounting": {
       "types": "./dist/core/accounting/index.d.ts",
       "import": "./dist/core/accounting/index.js"
+    },
+    "./party": {
+      "types": "./dist/core/party/index.d.ts",
+      "import": "./dist/core/party/index.js"
+    },
+    "./storage": {
+      "types": "./dist/core/storage/index.d.ts",
+      "import": "./dist/core/storage/index.js"
+    },
+    "./expenses": {
+      "types": "./dist/core/expenses/index.d.ts",
+      "import": "./dist/core/expenses/index.js"
+    },
+    "./invoices": {
+      "types": "./dist/core/invoice/invoice-manager.d.ts",
+      "import": "./dist/core/invoice/invoice-manager.js"
     }
   },
   "files": [

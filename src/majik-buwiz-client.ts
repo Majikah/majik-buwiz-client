@@ -72,13 +72,11 @@ import { AppDataSnapshot, ContactManagerSnapshot } from "./core/backup/types";
 import {
   HistoryLogStorageAdapter,
   InMemoryInvoiceAdapter,
+  InMemoryRecurringExpenseItemAdapter,
   StorageSource,
   UserActivityLogStorageAdapter,
 } from "./core/storage";
-import {
-  InMemoryRecurringExpenseItemAdapter,
-  RecurringExpenseManager,
-} from "./core/expenses/recurring-expense-manager";
+import { RecurringExpenseManager } from "./core/expenses/recurring-expense-manager";
 import { ExpenseManager } from "./core/expenses/expense-manager";
 import { ExpenseRecordStorageAdapter } from "./core/storage/expense/expense-records/_types";
 import { InMemoryExpenseRecordAdapter } from "./core/storage/expense/expense-records/adapter-memory";
