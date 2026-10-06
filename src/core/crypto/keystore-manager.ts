@@ -15,7 +15,7 @@ import { MajikKey, MajikKeyJSON } from "@majikah/majik-key";
 
 import { MajikKeyStorageAdapter } from "../storage/keystore/_types";
 import { InMemoryKeystoreAdapter } from "../storage/keystore/adapter-memory";
-import { MnemonicLanguage } from "@majikah/majik-key/dist/core/crypto/wordlist";
+import { MnemonicLanguage } from "@majikah/majik-key";
 
 // ─── Error ────────────────────────────────────────────────────────────────────
 

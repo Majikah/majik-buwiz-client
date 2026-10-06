@@ -14,5 +14,17 @@ export * from "./core/storage";
 
 export * from "./core/identity";
 export * from "./core/accounting";
+export * from "./core/accounting/types";
+export * from "./core/accounting/adapters/enums";
+
+export * from "./core/expenses/expense-record";
+export * from "./core/expenses/expense-manager";
+
+export type * from "./core/expenses/types";
+
+export * from "./core/expenses/recurring-expense-manager";
+export * from "./core/expenses/recurring/recurring-expense";
+export * from "./core/expenses/recurring/constants";
+export type * from "./core/expenses/recurring/types";
 
 export type { ContactManagerSnapshot } from "./core/backup/types";
