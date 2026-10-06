@@ -61,7 +61,7 @@ import {
 import {
   BatchDecryptResult,
   InvoiceDecryptionResult,
-} from "@majikah/majik-invoice/dist/core/majik-invoice";
+} from "@majikah/majik-invoice";
 import { prependMagic, readBackupBlob } from "./core/backup/utils";
 import {
   MAJIK_BUWIZ_BACKUP_MAGIC,
