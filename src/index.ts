@@ -26,6 +26,6 @@ export * from "./core/expenses/recurring/recurring-expense";
 export * from "./core/expenses/recurring/constants";
 export type * from "./core/expenses/recurring/types";
 
-export type { ContactManagerSnapshot } from "./core/backup/types";
+export * from "./core/backup";
 
 export * from "./core/log";
