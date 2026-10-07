@@ -53,7 +53,7 @@ export interface HistoryLogJSON extends BaseLogJSON<"history"> {
   historyType: HistoryType;
   status: HistoryStatus;
   source: HistorySource;
-  operation: SignatureOperation;
+  operation: InvoiceOperation;
   signerCount?: number;
   valid?: boolean;
   network?: NotaryNetwork;
@@ -81,30 +81,30 @@ export interface BaseHistoryEntry<
   source: HistorySource;
 }
 
-export interface SignatureOperation {
-  digest: string;
+export interface InvoiceOperation {
+  reference_id: string;
   detached: boolean;
   sealed: boolean;
   tsa: boolean;
 }
 
-export interface SignedHistoryEntry extends BaseHistoryEntry<"sign"> {
-  operation: SignatureOperation;
+export interface InvoiceHistoryEntry extends BaseHistoryEntry<"sign"> {
+  operation: InvoiceOperation;
   signerCount: number;
 }
 
 export interface VerifiedHistoryEntry extends BaseHistoryEntry<"verify"> {
-  operation: SignatureOperation;
+  operation: InvoiceOperation;
   valid: boolean;
 }
 
 export interface SealedHistoryEntry extends BaseHistoryEntry<"seal"> {
-  operation: SignatureOperation;
+  operation: InvoiceOperation;
 }
 
 // Added the missing Notarized interface based on your checklist
 export interface NotarizedHistoryEntry extends BaseHistoryEntry<"notarize"> {
-  operation: SignatureOperation;
+  operation: InvoiceOperation;
   network: NotaryNetwork;
   transactionId?: string; // Helpful for blockchain verification
 }
@@ -113,7 +113,7 @@ export interface NotarizedHistoryEntry extends BaseHistoryEntry<"notarize"> {
  * Union type for type-safe history handling.
  */
 export type HistoryEntry =
-  | SignedHistoryEntry
+  | InvoiceHistoryEntry
   | VerifiedHistoryEntry
   | SealedHistoryEntry
   | NotarizedHistoryEntry;

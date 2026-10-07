@@ -1,4 +1,9 @@
-import { MajikKey, MajikKeyAddress, MajikKeyBackup } from "@majikah/majik-key";
+import {
+  KeyId,
+  MajikKey,
+  MajikKeyAddress,
+  MajikKeyBackup,
+} from "@majikah/majik-key";
 
 import { MajikEnvelope, MajikRecipient } from "@majikah/majik-envelope";
 import { MajikCompressedJSON } from "@majikah/majik-cjson";
@@ -108,6 +113,10 @@ import {
   CreateUserActivityLogOptions,
   HistoryLog,
   HistoryLogManager,
+  HistorySource,
+  HistorySources,
+  HistoryStatuses,
+  HistoryTypes,
   UserActivityLog,
   UserActivityLogManager,
 } from "./core/log";
@@ -1594,37 +1603,72 @@ export class MajikBuwizClient extends MajikKeyClient<
       skipStore?: boolean;
     },
   ): Promise<MajikInvoice> {
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "createInvoice",
-    );
-    let recipients: MajikRecipient[] | undefined;
-    if (input.mode === "encrypted-and-signed") {
-      const keyRecipients = MajikInvoiceContact.toMajikContacts(
-        options?.recipientContacts,
-      );
-      recipients =
-        await MajikEnvelope.buildMajikRecipientsFromContacts(keyRecipients);
-    }
-    try {
-      const invoice = await MajikInvoice.create({
-        ...input,
-        signerKey,
-        recipients,
-        expectedSigners: options?.expectedSigners,
-      });
-      if (!options?.skipStore) {
-        // 🔥 increment here (ONLY if you're assigning number here)
-        await this._state.incrementInvoiceNumber();
-        await this._invoices.save(invoice);
-      }
+      async (signerKey) => {
+        let recipients: MajikRecipient[] | undefined;
+        if (input.mode === "encrypted-and-signed") {
+          const keyRecipients = MajikInvoiceContact.toMajikContacts(
+            options?.recipientContacts,
+          );
+          recipients =
+            await MajikEnvelope.buildMajikRecipientsFromContacts(keyRecipients);
+        }
 
-      this._emit("invoice-created", invoice);
-      return invoice;
-    } catch (err) {
-      this._emit("error", err, { context: "createInvoice" });
-      throw err;
-    }
+        const invoice = await MajikInvoice.create({
+          ...input,
+          signerKey,
+          recipients,
+          expectedSigners: options?.expectedSigners,
+        });
+        if (!options?.skipStore) {
+          await this._state.incrementInvoiceNumber();
+          await this._invoices.save(invoice);
+        }
+
+        this._emit("invoice-created", invoice);
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: invoice.id,
+          historyType: HistoryTypes.CREATE,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: invoice.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          data: invoice.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: invoice.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: invoice.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          signerCount: 1,
+          data: invoice.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: invoice.id,
+          action: AuditActions.INVOICE_CREATED,
+          metadata: { mode: invoice.mode, status: invoice.status },
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: invoice.id,
+          action: AuditActions.INVOICE_SIGNED,
+        });
+        return invoice;
+      },
+    );
   }
 
   async getInvoice(id: string): Promise<MajikInvoice | undefined> {
@@ -1767,20 +1811,38 @@ export class MajikBuwizClient extends MajikKeyClient<
     },
   ): Promise<MajikInvoice> {
     const invoice = await this._resolveInvoice(invoiceOrId);
-    const signerKey = this._resolveSignerKey(options?.accountId, "signInvoice");
-
-    try {
-      const signed = await invoice.sign(signerKey, {
-        expectedSigners: options?.expectedSigners,
-        timestamp: options?.timestamp,
-      });
-      await this._invoices.save(signed); // always save the result
-      this._emit("invoice-signed", signed);
-      return signed;
-    } catch (err) {
-      this._emit("error", err, { context: "signInvoice", invoiceOrId });
-      throw err;
-    }
+    return this._withSigningKey(
+      options?.accountId,
+      "signInvoice",
+      async (signerKey) => {
+        const signed = await invoice.sign(signerKey, {
+          expectedSigners: options?.expectedSigners,
+          timestamp: options?.timestamp,
+        });
+        await this._invoices.save(signed);
+        this._emit("invoice-signed", signed);
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: signed.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: signed.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          signerCount: 1,
+          data: signed.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: signed.id,
+          action: AuditActions.INVOICE_SIGNED,
+        });
+        return signed;
+      },
+    );
   }
 
   /**
@@ -1815,28 +1877,18 @@ export class MajikBuwizClient extends MajikKeyClient<
     const id = options?.accountId ?? this.getActiveAccount()?.id;
     if (!id)
       throw new Error("No active account — call setActiveAccount() first");
-
-    try {
-      await this._keys.ensureUnlocked(id);
-      const key = this._keys.get(id);
-      if (!key) throw new Error(`Account not found in keystore: "${id}"`);
-      if (!key.hasSigningKeys) {
-        throw new Error(
-          `Account "${id}" has no signing keys. ` +
-            `Re-import via importAccountFromMnemonicBackup() to enable signing.`,
-        );
-      }
-
-      return MajikSignature.signFile(file, key, {
-        contentType: options?.contentType,
-        timestamp: options?.timestamp,
-        mimeType: options?.mimeType,
-        expectedSigners: options?.expectedSigners,
-      });
-    } catch (err) {
-      this._emit("error", err, { context: "signFile" });
-      throw err;
-    }
+    return this._withSigningKey(
+      id,
+      "signFile",
+      (key) =>
+        MajikSignature.signFile(file, key, {
+          contentType: options?.contentType,
+          timestamp: options?.timestamp,
+          mimeType: options?.mimeType,
+          expectedSigners: options?.expectedSigners,
+        }),
+      [KeyId.ED25519, KeyId.ML_DSA_87],
+    );
   }
 
   async signExternalInvoice(
@@ -1847,19 +1899,37 @@ export class MajikBuwizClient extends MajikKeyClient<
       timestamp?: string;
     },
   ): Promise<MajikInvoice> {
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "signExternalInvoice",
+      async (signerKey) => {
+        const signed = await invoice.sign(signerKey, {
+          expectedSigners: options?.expectedSigners,
+          timestamp: options?.timestamp,
+        });
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: signed.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: signed.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          signerCount: 1,
+          data: signed.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: signed.id,
+          action: AuditActions.INVOICE_SIGNED,
+          metadata: { external: true },
+        });
+        return signed;
+      },
     );
-    try {
-      return await invoice.sign(signerKey, {
-        expectedSigners: options?.expectedSigners,
-        timestamp: options?.timestamp,
-      });
-    } catch (err) {
-      this._emit("error", err, { context: "signExternalInvoice" });
-      throw err;
-    }
   }
 
   async sealInvoice(
@@ -1867,16 +1937,36 @@ export class MajikBuwizClient extends MajikKeyClient<
     options?: { accountId?: string; timestamp?: string },
   ): Promise<MajikInvoice> {
     const invoice = await this._resolveInvoice(invoiceOrId);
-    const key = this._resolveKey(options?.accountId, "sealInvoice");
-    try {
-      const sealed = await invoice.seal(key, { timestamp: options?.timestamp });
-      await this._invoices.save(sealed);
-      this._emit("invoice-sealed", sealed);
-      return sealed;
-    } catch (err) {
-      this._emit("error", err, { context: "sealInvoice", invoiceOrId });
-      throw err;
-    }
+    return this._withSigningKey(
+      options?.accountId,
+      "sealInvoice",
+      async (key) => {
+        const sealed = await invoice.seal(key, {
+          timestamp: options?.timestamp,
+        });
+        await this._invoices.save(sealed);
+        this._emit("invoice-sealed", sealed);
+        await this._recordHistory(key.fingerprint, {
+          reference_id: sealed.id,
+          historyType: HistoryTypes.SEAL,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: sealed.id,
+            detached: false,
+            sealed: true,
+            tsa: false,
+          },
+          data: sealed.toBinary(),
+          identity: this._identityFromKey(key),
+        });
+        await this._recordActivity(key.fingerprint, {
+          reference_id: sealed.id,
+          action: AuditActions.INVOICE_SEALED,
+        });
+        return sealed;
+      },
+    );
   }
 
   async decryptInvoice(
@@ -2113,39 +2203,51 @@ export class MajikBuwizClient extends MajikKeyClient<
     },
   ): Promise<MajikInvoice> {
     const original = await this._resolveInvoice(invoiceOrId);
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "reissueInvoice",
+      async (signerKey) => {
+        const { publicKeys, recipients, signers } =
+          await this._contacts.getMajikahInvoiceData(
+            "id",
+            options?.recipientContactIds || [],
+            false,
+          );
+        const reissued = await original.reissue(updatedInvoice, {
+          signerKey,
+          recipients,
+          expectedSigners: signers,
+          recipientPublicKeys: publicKeys,
+        });
+        const withFreshCache = reissued.isEncrypted
+          ? reissued.withDecryptedCache(updatedInvoice, signerKey.fingerprint)
+          : reissued;
+
+        await this._invoices.save(withFreshCache);
+        this._emit("invoice-reissued", withFreshCache, original);
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: withFreshCache.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: withFreshCache.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          signerCount: 1,
+          data: withFreshCache.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: withFreshCache.id,
+          action: AuditActions.INVOICE_SIGNED,
+          metadata: { operation: "reissue" },
+        });
+        return withFreshCache;
+      },
     );
-
-    const { publicKeys, recipients, signers } =
-      await this._contacts.getMajikahInvoiceData(
-        "id",
-        options?.recipientContactIds || [],
-        false,
-      );
-    try {
-      const reissued = await original.reissue(updatedInvoice, {
-        signerKey,
-        recipients,
-        expectedSigners: signers,
-        recipientPublicKeys: publicKeys,
-      });
-
-      // For encrypted invoices: the reissued instance carries the OLD decrypted
-      // cache from the original. Stamp the updated GeneralInvoice as the fresh
-      // cache so callers get the correct content without needing to re-decrypt.
-      const withFreshCache = reissued.isEncrypted
-        ? reissued.withDecryptedCache(updatedInvoice, signerKey.fingerprint)
-        : reissued;
-
-      await this._invoices.save(withFreshCache);
-      this._emit("invoice-reissued", withFreshCache, original);
-      return withFreshCache;
-    } catch (err) {
-      this._emit("error", err, { context: "reissueInvoice", invoiceOrId });
-      throw err;
-    }
   }
 
   async restartInvoice(
@@ -2155,33 +2257,46 @@ export class MajikBuwizClient extends MajikKeyClient<
     },
   ): Promise<MajikInvoice> {
     const original = await this._resolveInvoice(invoiceOrId);
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
-      "reissueInvoice",
-    );
-    try {
-      if (original.isEncrypted) {
-        const convertedSigned = await original.toSignedOnly(
-          signerKey,
-          signerKey,
-          {
-            dropSignatures: true,
+      "restartInvoice",
+      async (signerKey) => {
+        let newInvoice: MajikInvoice;
+        if (original.isEncrypted) {
+          const convertedSigned = await original.toSignedOnly(
+            signerKey,
+            signerKey,
+            { dropSignatures: true },
+          );
+          newInvoice = await convertedSigned.restartInvoice(signerKey);
+        } else {
+          newInvoice = await original.restartInvoice(signerKey);
+        }
+        await this._invoices.save(newInvoice);
+        this._emit("invoice-reissued", newInvoice, original);
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: newInvoice.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: newInvoice.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
           },
-        );
-        const newInvoice = await convertedSigned.restartInvoice(signerKey);
-        await this._invoices.save(newInvoice);
-        this._emit("invoice-reissued", newInvoice, original);
+          signerCount: 1,
+          data: newInvoice.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: newInvoice.id,
+          action: AuditActions.INVOICE_CREATED,
+          metadata: { operation: "restart", originalInvoiceId: original.id },
+        });
         return newInvoice;
-      } else {
-        const newInvoice = await original.restartInvoice(signerKey);
-        await this._invoices.save(newInvoice);
-        this._emit("invoice-reissued", newInvoice, original);
-        return newInvoice;
-      }
-    } catch (err) {
-      this._emit("error", err, { context: "reissueInvoice", invoiceOrId });
-      throw err;
-    }
+      },
+    );
   }
 
   async setInvoiceMode(
@@ -2194,32 +2309,29 @@ export class MajikBuwizClient extends MajikKeyClient<
     },
   ): Promise<MajikInvoice> {
     const original = await this._resolveInvoice(invoiceOrId);
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
-      "reissueInvoice",
+      "setInvoiceMode",
+      async (signerKey) => {
+        let recipients: MajikRecipient[] | undefined;
+        if (original.mode === "encrypted-and-signed") {
+          const keyRecipients = MajikInvoiceContact.toMajikContacts(
+            options?.recipientContacts,
+          );
+          recipients =
+            await MajikEnvelope.buildMajikRecipientsFromContacts(keyRecipients);
+        }
+        const reissued = await original.setMode(newMode, {
+          signerKey,
+          recipients,
+          expectedSigners: options?.expectedSigners,
+          decryptKey: signerKey,
+        });
+        await this._invoices.save(reissued);
+        this._emit("invoice-reissued", reissued, original);
+        return reissued;
+      },
     );
-    let recipients: MajikRecipient[] | undefined;
-    if (original.mode === "encrypted-and-signed") {
-      const keyRecipients = MajikInvoiceContact.toMajikContacts(
-        options?.recipientContacts,
-      );
-      recipients =
-        await MajikEnvelope.buildMajikRecipientsFromContacts(keyRecipients);
-    }
-    try {
-      const reissued = await original.setMode(newMode, {
-        signerKey,
-        recipients,
-        expectedSigners: options?.expectedSigners,
-        decryptKey: signerKey,
-      });
-      await this._invoices.save(reissued);
-      this._emit("invoice-reissued", reissued, original);
-      return reissued;
-    } catch (err) {
-      this._emit("error", err, { context: "setInvoiceMode", invoiceOrId });
-      throw err;
-    }
   }
 
   async canSignInvoice(
@@ -2351,43 +2463,54 @@ export class MajikBuwizClient extends MajikKeyClient<
     recipientContactIds: string[],
     options?: { accountId?: string },
   ): Promise<MajikInvoice> {
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "reissueSignAndStore",
+      async (signerKey) => {
+        const { publicKeys, recipients, signers } =
+          await this._contacts.getMajikahInvoiceData(
+            "id",
+            recipientContactIds,
+            true,
+          );
+        const reissued = await invoice.reissue(updatedDraft, {
+          signerKey,
+          recipients,
+          expectedSigners: signers,
+          recipientPublicKeys: publicKeys,
+        });
+        const signed = await reissued.sign(signerKey, {
+          expectedSigners: signers,
+        });
+        const withFreshCache = signed.isEncrypted
+          ? signed.withDecryptedCache(updatedDraft, signerKey.fingerprint)
+          : signed;
+
+        await this._invoices.save(withFreshCache);
+        this._emit("invoice-updated", withFreshCache);
+        await this._recordHistory(signerKey.fingerprint, {
+          reference_id: withFreshCache.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source: HistorySources.SYSTEM,
+          operation: {
+            reference_id: withFreshCache.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          signerCount: 1,
+          data: withFreshCache.toBinary(),
+          identity: this._identityFromKey(signerKey),
+        });
+        await this._recordActivity(signerKey.fingerprint, {
+          reference_id: withFreshCache.id,
+          action: AuditActions.INVOICE_SIGNED,
+          metadata: { operation: "update" },
+        });
+        return withFreshCache;
+      },
     );
-
-    const { publicKeys, recipients, signers } =
-      await this._contacts.getMajikahInvoiceData(
-        "id",
-        recipientContactIds,
-        true,
-      );
-
-    try {
-      const reissued = await invoice.reissue(updatedDraft, {
-        signerKey,
-        recipients,
-        expectedSigners: signers,
-        recipientPublicKeys: publicKeys,
-      });
-
-      const signed = await reissued.sign(signerKey, {
-        expectedSigners: signers,
-      });
-
-      // Stamp the updated GeneralInvoice as the fresh decrypted cache
-      // so the panel renders the correct content without a re-decrypt round-trip.
-      const withFreshCache = signed.isEncrypted
-        ? signed.withDecryptedCache(updatedDraft, signerKey.fingerprint)
-        : signed;
-
-      await this._invoices.save(withFreshCache);
-      this._emit("invoice-updated", withFreshCache);
-      return withFreshCache;
-    } catch (err) {
-      this._emit("error", err, { context: "reissueSignAndStore" });
-      throw err;
-    }
   }
 
   /**
@@ -2409,52 +2532,92 @@ export class MajikBuwizClient extends MajikKeyClient<
       accountOwnerId?: string;
       status?: InvoiceStatus;
     },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "finalizeInvoice",
+      async (key) => {
+        if (
+          mode === "encrypted-and-signed" &&
+          recipientContactIds.length === 0
+        ) {
+          throw new MajikInvoiceError(
+            "At least one recipient contact is required for encrypted-and-signed mode.",
+          );
+        }
+
+        const { publicKeys, recipients, signers } =
+          await this._contacts.getMajikahInvoiceData(
+            "id",
+            recipientContactIds,
+            true,
+          );
+
+        const invoiceInput = draft.toMajikInvoiceInput();
+
+        const created = await MajikInvoice.create({
+          ...invoiceInput,
+          mode,
+          signerKey: key,
+          recipients,
+          status: options?.status ?? "issued",
+          userId: options?.userId,
+          accountId: options?.accountOwnerId ?? options?.userId,
+          expectedSigners: signers,
+          recipientPublicKeys: publicKeys,
+        });
+
+        const signed = await created.sign(key, {
+          expectedSigners: signers,
+        });
+
+        await this._state.incrementInvoiceNumber();
+        await this._invoices.save(signed);
+        this._emit("invoice-created", signed);
+
+        await this._recordHistory(key.fingerprint, {
+          reference_id: signed.id,
+          historyType: HistoryTypes.CREATE,
+          status: HistoryStatuses.SUCCESS,
+          source,
+          operation: {
+            reference_id: signed.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          data: signed.toBinary(),
+          identity: this._identityFromKey(key),
+        });
+        this._recordHistory(key.fingerprint, {
+          reference_id: signed.id,
+          historyType: HistoryTypes.SIGN,
+          status: HistoryStatuses.SUCCESS,
+          source,
+          operation: {
+            reference_id: signed.id,
+            detached: false,
+            sealed: false,
+            tsa: false,
+          },
+          signerCount: 1,
+          data: signed.toBinary(),
+          identity: this._identityFromKey(key),
+        }).catch((err) => console.warn(err));
+        await this._recordActivity(key.fingerprint, {
+          reference_id: signed.id,
+          action: AuditActions.INVOICE_CREATED,
+          metadata: { mode: signed.mode, status: signed.status },
+        });
+        await this._recordActivity(key.fingerprint, {
+          reference_id: signed.id,
+          action: AuditActions.INVOICE_SIGNED,
+        });
+
+        return signed;
+      },
     );
-
-    if (mode === "encrypted-and-signed" && recipientContactIds.length === 0) {
-      throw new MajikInvoiceError(
-        "At least one recipient contact is required for encrypted-and-signed mode.",
-      );
-    }
-
-    const { publicKeys, recipients, signers } =
-      await this._contacts.getMajikahInvoiceData(
-        "id",
-        recipientContactIds,
-        true,
-      );
-
-    try {
-      const invoiceInput = draft.toMajikInvoiceInput();
-
-      const created = await MajikInvoice.create({
-        ...invoiceInput,
-        mode,
-        signerKey,
-        recipients,
-        status: options?.status ?? "issued",
-        userId: options?.userId,
-        accountId: options?.accountOwnerId ?? options?.userId,
-        expectedSigners: signers,
-        recipientPublicKeys: publicKeys,
-      });
-
-      const signed = await created.sign(signerKey, {
-        expectedSigners: signers,
-      });
-
-      await this._state.incrementInvoiceNumber();
-      await this._invoices.save(signed);
-      this._emit("invoice-created", signed);
-      return signed;
-    } catch (err) {
-      this._emit("error", err, { context: "finalizeInvoice" });
-      throw err;
-    }
   }
 
   /**
@@ -2486,56 +2649,71 @@ export class MajikBuwizClient extends MajikKeyClient<
       );
     }
 
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "switchInvoiceMode",
+      async (signerKey) => {
+        const isContactId =
+          recipientContactIds && recipientContactIds.length > 0;
+        const { publicKeys, recipients, signers } =
+          await this._contacts.getMajikahInvoiceData(
+            isContactId ? "id" : "public_key",
+            isContactId ? recipientContactIds : invoice.recipients!,
+            true,
+          );
+        const dropSignatures = options?.dropSignatures ?? false;
+        let finalInvoice: MajikInvoice;
+
+        if (dropSignatures) {
+          const updated = await invoice.setMode(newMode, {
+            signerKey,
+            recipients:
+              newMode === "encrypted-and-signed" ? recipients : undefined,
+            decryptKey: signerKey,
+            recipientPublicKeys: publicKeys,
+            expectedSigners: signers,
+            dropSignatures: true,
+          });
+          finalInvoice = await updated.sign(signerKey, {
+            expectedSigners: signers,
+          });
+        } else {
+          finalInvoice = await invoice.setMode(newMode, {
+            recipients:
+              newMode === "encrypted-and-signed" ? recipients : undefined,
+            decryptKey: signerKey,
+            recipientPublicKeys: publicKeys,
+            dropSignatures: false,
+          });
+        }
+
+        await this._invoices.save(finalInvoice);
+        this._emit("invoice-updated", finalInvoice);
+        if (dropSignatures) {
+          await this._recordHistory(signerKey.fingerprint, {
+            reference_id: finalInvoice.id,
+            historyType: HistoryTypes.SIGN,
+            status: HistoryStatuses.SUCCESS,
+            source: HistorySources.SYSTEM,
+            operation: {
+              reference_id: finalInvoice.id,
+              detached: false,
+              sealed: false,
+              tsa: false,
+            },
+            signerCount: 1,
+            data: finalInvoice.toBinary(),
+            identity: this._identityFromKey(signerKey),
+          });
+          await this._recordActivity(signerKey.fingerprint, {
+            reference_id: finalInvoice.id,
+            action: AuditActions.INVOICE_SIGNED,
+            metadata: { operation: "mode-switch", mode: newMode },
+          });
+        }
+        return finalInvoice;
+      },
     );
-
-    const isContactId = recipientContactIds && recipientContactIds.length > 0;
-
-    const { publicKeys, recipients, signers } =
-      await this._contacts.getMajikahInvoiceData(
-        isContactId ? "id" : "public_key",
-        isContactId ? recipientContactIds : invoice.recipients!,
-        true,
-      );
-
-    const dropSignatures = options?.dropSignatures ?? false;
-
-    let finalInvoice = invoice;
-
-    try {
-      if (dropSignatures) {
-        const updated = await invoice.setMode(newMode, {
-          signerKey,
-          recipients:
-            newMode === "encrypted-and-signed" ? recipients : undefined,
-          decryptKey: signerKey,
-          recipientPublicKeys: publicKeys,
-          expectedSigners: signers,
-          dropSignatures: true,
-        });
-
-        finalInvoice = await updated.sign(signerKey, {
-          expectedSigners: signers,
-        });
-      } else {
-        finalInvoice = await invoice.setMode(newMode, {
-          recipients:
-            newMode === "encrypted-and-signed" ? recipients : undefined,
-          decryptKey: signerKey,
-          recipientPublicKeys: publicKeys,
-          dropSignatures: false,
-        });
-      }
-
-      await this._invoices.save(finalInvoice);
-      this._emit("invoice-updated", finalInvoice);
-      return finalInvoice;
-    } catch (err) {
-      this._emit("error", err, { context: "switchInvoiceMode" });
-      throw err;
-    }
   }
   // ==========================================================================
   // ── Backup App Data ───────────────────────────────────────────────────────
@@ -2612,26 +2790,24 @@ export class MajikBuwizClient extends MajikKeyClient<
       skipStore?: boolean;
     },
   ): Promise<ExpenseRecord> {
-    const signerKey = this._resolveSignerKey(
+    return this._withSigningKey(
       options?.accountId,
       "createExpense",
+      async (signerKey) => {
+        const expense = ExpenseRecord.create({
+          ...input,
+          accountId: signerKey.fingerprint,
+        });
+        if (!options?.skipStore) {
+          await this._expenses.save(expense);
+        }
+
+        this._emit("expense-created", expense);
+        await this._recordExpenseCreated(expense);
+        return expense;
+      },
+      [KeyId.ED25519, KeyId.ML_DSA_87],
     );
-
-    try {
-      const expense = ExpenseRecord.create({
-        ...input,
-        accountId: signerKey.fingerprint,
-      });
-      if (!options?.skipStore) {
-        await this._expenses.save(expense);
-      }
-
-      this._emit("expense-created", expense);
-      return expense;
-    } catch (err) {
-      this._emit("error", err, { context: "createExpense" });
-      throw err;
-    }
   }
 
   async duplicateExpense(
@@ -2662,8 +2838,16 @@ export class MajikBuwizClient extends MajikKeyClient<
   }
 
   async clearExpenses(): Promise<void> {
+    const clearedCount = this._expenses.cachedCount;
     await this._expenses.clear();
     this._emit("expense-clear");
+    if (clearedCount > 0) {
+      await this._recordActivity(this.getActiveAccountKey()?.fingerprint, {
+        reference_id: "expenses-cleared",
+        action: AuditActions.EXPENSES_CLEARED,
+        metadata: { clearedCount },
+      });
+    }
   }
 
   listExpenses(): ExpenseRecord[] {
@@ -2744,11 +2928,27 @@ export class MajikBuwizClient extends MajikKeyClient<
     const exists = this._expenses.has(record.id);
     await this._expenses.save(record);
     this._emit(exists ? "expense-updated" : "expense-created", record);
+    if (exists) {
+      await this._recordActivity(record.accountId ?? undefined, {
+        reference_id: record.id,
+        action: AuditActions.EXPENSE_UPDATED,
+        metadata: { category: record.category, status: record.status },
+      });
+    } else {
+      await this._recordExpenseCreated(record);
+    }
   }
 
   async removeExpense(id: string): Promise<boolean> {
+    const expense = await this._expenses.getById(id);
     const removed = await this._expenses.remove(id);
-    if (removed) this._emit("expense-removed", id);
+    if (removed) {
+      this._emit("expense-removed", id);
+      await this._recordActivity(expense?.accountId ?? undefined, {
+        reference_id: id,
+        action: AuditActions.EXPENSE_DELETED,
+      });
+    }
     return removed;
   }
 
@@ -2764,6 +2964,9 @@ export class MajikBuwizClient extends MajikKeyClient<
       },
       options,
     );
+    await Promise.all(
+      result.created.map((expense) => this._recordExpenseActualized(expense)),
+    );
     this._emit("expense-actualized", itemId, result);
     return result;
   }
@@ -2773,10 +2976,15 @@ export class MajikBuwizClient extends MajikKeyClient<
   ): Promise<Map<string, ActualizationResult>> {
     const results = await this._recurringExpenses.actualizeAll(
       {
-        saveRecord: (r) => this._expenses.save(r),
+        saveRecord: (r) => this.storeExpense(r),
         isActualized: (id, month) => this._expenses.isActualized(id, month),
       },
       options,
+    );
+    await Promise.all(
+      [...results.values()].flatMap((result) =>
+        result.created.map((expense) => this._recordExpenseActualized(expense)),
+      ),
     );
     this._emit("expense-actualized", null, results);
     return results;
@@ -3192,6 +3400,87 @@ export class MajikBuwizClient extends MajikKeyClient<
   // ==========================================================================
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────
   // ==========================================================================
+
+  /**
+   * One place for unlock -> signing-keys check -> one-time-unlock relock.
+   * New methods use this; you can migrate sign()/signFile()/seal() onto it later
+   * to delete the copy-pasted boilerplate.
+   * @param accountId - Account identifier to use. When omitted, the currently active account is used where supported.
+   * @param context - Value used by the _with signing key operation.
+   * @param fn - Value used by the _with signing key operation.
+   * @returns The result of the with signing key operation (`Promise<T>`).
+   * @throws {Error} When validation fails, required local data is unavailable, or the underlying operation cannot be completed.
+   */
+  private async _withSigningKey<T>(
+    accountId: string | undefined,
+    context: string,
+    fn: (key: MajikKey) => Promise<T>,
+    requiredKeyIds: KeyId[] = [
+      KeyId.ED25519,
+      KeyId.ML_DSA_87,
+      KeyId.ML_KEM_768,
+    ],
+  ): Promise<T> {
+    const id = accountId ?? this.getActiveAccount()?.id;
+    if (!id)
+      throw new Error("No active account — call setActiveAccount() first");
+
+    let key: MajikKey | undefined;
+    let shouldRelock = false;
+    try {
+      await this._keys.ensureUnlocked(id);
+      key = this._keys.get(id);
+      if (!key) throw new Error(`Account not found in keystore: "${id}"`);
+      if (!key.hasKeys(requiredKeyIds)) {
+        throw new Error(
+          `Account "${id}" has no signing and encryption keys. ` +
+            `Re-import via importAccountFromMnemonicBackup() to enable signing and encryption.`,
+        );
+      }
+      shouldRelock = !(await this.isOnetimeUnlockEnabled());
+      return await fn(key);
+    } catch (err) {
+      this._emit("error", err, { context });
+      throw err;
+    } finally {
+      if (shouldRelock) key?.lock();
+    }
+  }
+
+  private async _recordExpenseCreated(record: ExpenseRecord): Promise<void> {
+    const fingerprint = record.accountId ?? undefined;
+    await this._recordHistory(fingerprint, {
+      reference_id: record.id,
+      historyType: HistoryTypes.CREATE,
+      status: HistoryStatuses.SUCCESS,
+      source: HistorySources.SYSTEM,
+      operation: {
+        reference_id: record.id,
+        detached: false,
+        sealed: false,
+        tsa: false,
+      },
+    });
+    await this._recordActivity(fingerprint, {
+      reference_id: record.id,
+      action: AuditActions.EXPENSE_CREATED,
+      metadata: {
+        category: record.category,
+        status: record.status,
+        recurring: !!record.recurringId,
+      },
+    });
+  }
+
+  private async _recordExpenseActualized(
+    expense: ExpenseRecordJSON,
+  ): Promise<void> {
+    await this._recordActivity(expense.account_id ?? undefined, {
+      reference_id: expense.id,
+      action: AuditActions.EXPENSE_ACTUALIZED,
+      metadata: { recurringId: expense.recurring_id },
+    });
+  }
 
   // Private helper — add once, use in every invoice method
   private async _resolveInvoice(

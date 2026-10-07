@@ -5,6 +5,7 @@ export const LogTypes = {
 export type LogType = (typeof LogTypes)[keyof typeof LogTypes];
 
 export const HistoryTypes = {
+  CREATE: "create",
   SIGN: "sign",
   VERIFY: "verify",
   SEAL: "seal",
@@ -33,14 +34,17 @@ export type HistorySource =
   (typeof HistorySources)[keyof typeof HistorySources];
 
 export const AuditActions = {
-  FILE_VIEWED: "file_viewed",
-  FILE_SIGNED: "file_signed",
-  FILE_VERIFIED: "file_verified",
-  FILE_SEALED: "file_sealed",
-  FILE_NOTARIZED: "file_notarized",
-  STAMP_CREATED: "stamp_created",
-  STAMP_UPDATED: "stamp_updated",
-  STAMP_DELETED: "stamp_deleted",
+  INVOICE_CREATED: "invoice_created",
+  INVOICE_VIEWED: "invoice_viewed",
+  INVOICE_SIGNED: "invoice_signed",
+  INVOICE_VERIFIED: "invoice_verified",
+  INVOICE_SEALED: "invoice_sealed",
+  INVOICE_NOTARIZED: "invoice_notarized",
+  EXPENSE_CREATED: "expense_created",
+  EXPENSE_UPDATED: "expense_updated",
+  EXPENSE_DELETED: "expense_deleted",
+  EXPENSE_ACTUALIZED: "expense_actualized",
+  EXPENSES_CLEARED: "expenses_cleared",
   CREDITS_TOPUP: "credits_topup",
   CREDITS_USED: "credits_used",
   LOGIN: "login",

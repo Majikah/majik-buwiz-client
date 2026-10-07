@@ -5,7 +5,7 @@ import { getTestKey } from "./helpers/crypto";
 import { MajikEnvelope } from "@majikah/majik-envelope";
 import { MajikInvoice } from "@majikah/majik-invoice";
 import { MajikInvoiceContact } from "../src/core/party/majik-invoice-contact";
-import { AuditActions } from "../src/core/log";
+import { AuditActions, HistoryTypes } from "../src/core/log";
 import { MAJIK_BUWIZ_BACKUP_MAGIC } from "../src/core/backup/constants";
 import { prependMagic } from "../src/core/backup/utils";
 
@@ -715,6 +715,23 @@ describe("MajikBuwizClient", () => {
       expect(events).toEqual([invoice]);
       expect(invoice.isSigned).toBe(true);
       expect(invoice.integrity.signatures.length).toBeGreaterThan(0);
+
+      const history = client.historyManager
+        .listByFingerprint(activeKey.fingerprint)
+        .filter((entry) => entry.reference_id === invoice.id);
+      expect(history.map((entry) => entry.historyType)).toEqual(
+        expect.arrayContaining([HistoryTypes.CREATE, HistoryTypes.SIGN]),
+      );
+
+      const activity = client.activityManager
+        .listByFingerprint(activeKey.fingerprint)
+        .filter((entry) => entry.reference_id === invoice.id);
+      expect(activity.map((entry) => entry.action)).toEqual(
+        expect.arrayContaining([
+          AuditActions.INVOICE_CREATED,
+          AuditActions.INVOICE_SIGNED,
+        ]),
+      );
     });
 
     it("creates a real encrypted-and-signed invoice from actual contacts", async () => {
@@ -1162,6 +1179,32 @@ describe("MajikBuwizClient", () => {
       expect(client.listExpenses()).toEqual([]);
     });
 
+    it("records create history and activity for a new expense", async () => {
+      const expense = await client.createExpense({
+        category: "other",
+        documentType: "supplier-invoice",
+        description: "Office supplies",
+        payee: { legalName: "Example Vendor" },
+        paidBy: { legalName: "Example Company" },
+        currency: "PHP",
+        totalAmount: 125,
+      });
+
+      const history = client.historyManager
+        .listByFingerprint(activeKey.fingerprint)
+        .filter((entry) => entry.reference_id === expense.id);
+      expect(history.map((entry) => entry.historyType)).toContain(
+        HistoryTypes.CREATE,
+      );
+
+      const activity = client.activityManager
+        .listByFingerprint(activeKey.fingerprint)
+        .filter((entry) => entry.reference_id === expense.id);
+      expect(activity.map((entry) => entry.action)).toContain(
+        AuditActions.EXPENSE_CREATED,
+      );
+    });
+
     it("clears an already-empty expense store", async () => {
       await client.clearExpenses();
       expect(client.listExpenses()).toEqual([]);
@@ -1542,7 +1585,7 @@ describe("MajikBuwizClient", () => {
       try {
         await expect(
           isolated.createInvoice(invoiceDraftInput()),
-        ).rejects.toThrow(/locked|signing/i);
+        ).rejects.toThrow(/locked|signing|unlock/i);
       } finally {
         await lockedKey.unlock(TEST_PASSPHRASE);
       }

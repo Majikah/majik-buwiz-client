@@ -12,7 +12,7 @@ import {
 } from "./enums";
 import { LogError } from "./error";
 import { BaseLog } from "./log-entry";
-import { HistoryLogJSON, SignatureOperation } from "./types";
+import { HistoryLogJSON, InvoiceOperation } from "./types";
 import { MajikFileIdentity } from "@majikah/majik-file";
 
 // core/log/core/history-log.ts
@@ -23,7 +23,7 @@ export interface CreateHistoryLogOptions {
   historyType: HistoryType;
   status: HistoryStatus;
   source: HistorySource;
-  operation: SignatureOperation;
+  operation: InvoiceOperation;
   signerCount?: number;
   valid?: boolean;
   network?: NotaryNetwork;
@@ -43,7 +43,7 @@ export class HistoryLog extends BaseLog<"history"> {
   protected _historyType: HistoryType;
   protected _status: HistoryStatus;
   protected _source: HistorySource;
-  protected _operation: SignatureOperation;
+  protected _operation: InvoiceOperation;
 
   // Conditional fields based on historyType
   protected _signerCount?: number;
@@ -149,11 +149,11 @@ export class HistoryLog extends BaseLog<"history"> {
     this._source = value;
   }
 
-  get operation(): SignatureOperation {
+  get operation(): InvoiceOperation {
     return this._operation;
   }
 
-  set operation(value: SignatureOperation) {
+  set operation(value: InvoiceOperation) {
     this.validateOperation(value);
     this._operation = value;
   }
@@ -209,10 +209,10 @@ export class HistoryLog extends BaseLog<"history"> {
     }
   }
 
-  private validateOperation(value: SignatureOperation): void {
-    if (!value || !value.digest) {
+  private validateOperation(value: InvoiceOperation): void {
+    if (!value || !value.reference_id) {
       throw new LogError(
-        "Operation must include a digest",
+        "Operation must include a reference_id",
         "INVALID_OPERATION",
       );
     }
