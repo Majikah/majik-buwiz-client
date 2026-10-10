@@ -2,7 +2,7 @@
   "name": "@majikah/majik-buwiz-client",
   "type": "module",
   "description": "A TypeScript invoice management library that combines structured accounting logic with cryptographic envelope for signing, verification, encryption, and secure document workflows.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "license": "Apache-2.0",
   "author": "Zelijah",
   "main": "./dist/index.js",
