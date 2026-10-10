@@ -3,9 +3,9 @@ import { MajikInvoiceContactManagerError } from "./errors";
 import {
   ContactManagerQueryMode,
   MajikInvoiceContactCard,
-  MajikInvoiceContactData,
   MajikInvoiceContactGroupMeta,
   MajikInvoiceContactManagerJSON,
+  MajikInvoiceContactMeta,
 } from "./types";
 import {
   arrayBufferToBase64,
@@ -211,7 +211,9 @@ export class MajikInvoiceContactManager {
    */
   async updateContactMeta(
     id: string,
-    meta: Partial<MajikInvoiceContactData["meta"]>,
+    meta: Partial<
+      Omit<MajikInvoiceContactMeta, "createdAt" | "updatedAt" | "blocked">
+    >,
   ): Promise<MajikInvoiceContact> {
     const contact = this.directory.updateContactMeta(id, meta);
     await this.persistContact(contact);

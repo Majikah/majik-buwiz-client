@@ -6,8 +6,8 @@ import { MajikKeyAddress } from "@majikah/majik-key";
 import { MajikInvoiceContact } from "./majik-invoice-contact";
 import { MajikInvoiceContactDirectoryError } from "./errors";
 import {
-  MajikInvoiceContactData,
   MajikInvoiceContactDirectoryData,
+  MajikInvoiceContactMeta,
   SerializedMajikInvoiceContact,
 } from "./types";
 
@@ -74,16 +74,16 @@ export class MajikInvoiceContactDirectory {
 
   updateContactMeta(
     id: string,
-    meta: Partial<MajikInvoiceContactData["meta"]>,
+    meta: Partial<
+      Omit<MajikInvoiceContactMeta, "createdAt" | "updatedAt" | "blocked">
+    >,
   ): MajikInvoiceContact {
     const contact = this.getContact(id);
     if (!contact)
       throw new MajikInvoiceContactDirectoryError("Contact not found");
 
     if (meta) {
-      meta.label && contact.updateLabel(meta.label);
-      meta.notes && contact.updateNotes(meta.notes);
-      meta.blocked !== undefined && contact.setBlocked(meta.blocked);
+      contact.updateMeta(meta);
     }
 
     return contact;
