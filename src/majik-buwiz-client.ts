@@ -2547,12 +2547,17 @@ export class MajikBuwizClient extends MajikKeyClient<
           );
         }
 
-        const { publicKeys, recipients, signers } =
-          await this._contacts.getMajikahInvoiceData(
-            "id",
-            recipientContactIds,
-            true,
-          );
+        const { publicKeys, recipients, signers } = recipientContactIds.length
+          ? await this._contacts.getMajikahInvoiceData(
+              "id",
+              recipientContactIds,
+              true,
+            )
+          : {
+              publicKeys: undefined,
+              recipients: undefined,
+              signers: undefined,
+            };
 
         const invoiceInput = draft.toMajikInvoiceInput();
 

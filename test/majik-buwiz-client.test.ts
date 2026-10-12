@@ -1017,6 +1017,15 @@ describe("MajikBuwizClient", () => {
       expect(client.invoiceCount).toBe(1);
     });
 
+    it("finalizes a signed-only invoice without requiring contacts", async () => {
+      const draft = (await createRealInvoice()).invoice;
+      const result = await client.finalizeInvoice(draft as any, "signed-only", []);
+
+      expect(result.isSigned).toBe(true);
+      expect(client.hasInvoice(result.id)).toBe(true);
+      expect(client.invoiceCount).toBe(1);
+    });
+
     it("requires recipients when finalizing encrypted invoices", async () => {
       await expect(
         client.finalizeInvoice(
