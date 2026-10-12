@@ -882,7 +882,7 @@ export class MajikInvoiceContactManager {
       fingerprint: data.fingerprint,
       meta: {
         label: data.label,
-        legalName: data.partyMeta.legalName || data.label,
+        legalName: data?.partyMeta?.legalName || data.label,
       },
       mlKey: data.mlKey,
       edPublicKeyBase64: data.edPublicKeyBase64,
