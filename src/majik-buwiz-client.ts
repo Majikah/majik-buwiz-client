@@ -2581,7 +2581,7 @@ export class MajikBuwizClient extends MajikKeyClient<
         await this._invoices.save(signed);
         this._emit("invoice-created", signed);
 
-        await this._recordHistory(key.fingerprint, {
+        void this._recordHistory(key.fingerprint, {
           reference_id: signed.id,
           historyType: HistoryTypes.CREATE,
           status: HistoryStatuses.SUCCESS,
@@ -2595,7 +2595,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           data: signed.toBinary(),
           identity: this._identityFromKey(key),
         });
-        this._recordHistory(key.fingerprint, {
+        void this._recordHistory(key.fingerprint, {
           reference_id: signed.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
@@ -2609,13 +2609,13 @@ export class MajikBuwizClient extends MajikKeyClient<
           signerCount: 1,
           data: signed.toBinary(),
           identity: this._identityFromKey(key),
-        }).catch((err) => console.warn(err));
-        await this._recordActivity(key.fingerprint, {
+        });
+        void this._recordActivity(key.fingerprint, {
           reference_id: signed.id,
           action: AuditActions.INVOICE_CREATED,
           metadata: { mode: signed.mode, status: signed.status },
         });
-        await this._recordActivity(key.fingerprint, {
+        void this._recordActivity(key.fingerprint, {
           reference_id: signed.id,
           action: AuditActions.INVOICE_SIGNED,
         });

@@ -1026,6 +1026,21 @@ describe("MajikBuwizClient", () => {
       expect(client.invoiceCount).toBe(1);
     });
 
+    it("returns the created invoice while audit writes are still pending", async () => {
+      vi.spyOn(client.historyManager, "create").mockImplementation(
+        () => new Promise(() => {}),
+      );
+      vi.spyOn(client.activityManager, "create").mockImplementation(
+        () => new Promise(() => {}),
+      );
+
+      const draft = (await createRealInvoice()).invoice;
+      const result = await client.finalizeInvoice(draft, "signed-only", []);
+
+      expect(result.isSigned).toBe(true);
+      expect(client.hasInvoice(result.id)).toBe(true);
+    });
+
     it("requires recipients when finalizing encrypted invoices", async () => {
       await expect(
         client.finalizeInvoice(
