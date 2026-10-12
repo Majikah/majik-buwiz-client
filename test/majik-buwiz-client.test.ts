@@ -1019,7 +1019,7 @@ describe("MajikBuwizClient", () => {
 
     it("finalizes a signed-only invoice without requiring contacts", async () => {
       const draft = (await createRealInvoice()).invoice;
-      const result = await client.finalizeInvoice(draft as any, "signed-only", []);
+      const result = await client.finalizeInvoice(draft, "signed-only", []);
 
       expect(result.isSigned).toBe(true);
       expect(client.hasInvoice(result.id)).toBe(true);
