@@ -5,7 +5,7 @@ import { getTestKey } from "./helpers/crypto";
 import { MajikEnvelope } from "@majikah/majik-envelope";
 import { MajikInvoice } from "@majikah/majik-invoice";
 import { MajikInvoiceContact } from "../src/core/party/majik-invoice-contact";
-import { AuditActions, HistoryTypes } from "../src/core/log";
+import { AuditActions, HistorySources, HistoryTypes } from "../src/core/log";
 import { MAJIK_BUWIZ_BACKUP_MAGIC } from "../src/core/backup/constants";
 import { prependMagic } from "../src/core/backup/utils";
 
@@ -722,6 +722,10 @@ describe("MajikBuwizClient", () => {
       expect(history.map((entry) => entry.historyType)).toEqual(
         expect.arrayContaining([HistoryTypes.CREATE, HistoryTypes.SIGN]),
       );
+      expect(history.map((entry) => entry.source)).toEqual([
+        HistorySources.SYSTEM,
+        HistorySources.SYSTEM,
+      ]);
 
       const activity = client.activityManager
         .listByFingerprint(activeKey.fingerprint)
@@ -751,6 +755,21 @@ describe("MajikBuwizClient", () => {
       };
       expect(encryptedPayload.recipientFingerprints).toHaveLength(2);
       expect(client.hasInvoice(invoice.id)).toBe(true);
+    });
+
+    it("records the supplied history source when creating an invoice", async () => {
+      const invoice = await client.createInvoice(
+        invoiceDraftInput(),
+        undefined,
+        HistorySources.GUI,
+      );
+
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .filter((entry) => entry.reference_id === invoice.id)
+          .map((entry) => entry.source),
+      ).toEqual([HistorySources.GUI, HistorySources.GUI]);
     });
 
     it("supports skipStore without mocking MajikInvoice.create", async () => {
@@ -856,9 +875,22 @@ describe("MajikBuwizClient", () => {
       await client.storeInvoice(unsigned);
       expect(unsigned.isSigned).toBe(false);
 
-      const signed = await client.signInvoice(unsigned.id);
+      const signed = await client.signInvoice(
+        unsigned.id,
+        undefined,
+        HistorySources.API,
+      );
       expect(signed.isSigned).toBe(true);
       expect(signed.integrity.signatures.length).toBeGreaterThan(0);
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === signed.id &&
+              entry.historyType === HistoryTypes.SIGN,
+          )?.source,
+      ).toBe(HistorySources.API);
 
       const all = await client.verifyInvoiceSignatures(signed);
       expect(all.length).toBeGreaterThan(0);
@@ -873,9 +905,22 @@ describe("MajikBuwizClient", () => {
 
     it("seals and verifies the real invoice seal", async () => {
       const invoice = await createStoredInvoice(client, { signed: true });
-      const sealed = await client.sealInvoice(invoice.id);
+      const sealed = await client.sealInvoice(
+        invoice.id,
+        undefined,
+        HistorySources.GUI,
+      );
 
       expect(sealed.isSealed).toBe(true);
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === sealed.id &&
+              entry.historyType === HistoryTypes.SEAL,
+          )?.source,
+      ).toBe(HistorySources.GUI);
       const verification = await client.verifyInvoiceSeal(sealed);
       expect(verification.valid).toBe(true);
       expect(await client.getInvoiceSealInfo(sealed.id)).toEqual(
@@ -1006,12 +1051,24 @@ describe("MajikBuwizClient", () => {
       );
 
       const draft = (await createRealInvoice()).invoice;
-      const result = await client.finalizeInvoice(draft as any, "signed-only", [
-        activeContact.id,
-      ]);
+      const result = await client.finalizeInvoice(
+        draft as any,
+        "signed-only",
+        [activeContact.id],
+        undefined,
+        HistorySources.API,
+      );
 
       expect(result).toBeInstanceOf(MajikInvoice);
       expect(result.isSigned).toBe(true);
+      await vi.waitFor(() => {
+        expect(
+          client.historyManager
+            .listByFingerprint(activeKey.fingerprint)
+            .filter((entry) => entry.reference_id === result.id)
+            .map((entry) => entry.source),
+        ).toEqual([HistorySources.API, HistorySources.API]);
+      });
       expect(client.hasInvoice(result.id)).toBe(true);
       expect(events.at(-1)).toBe(result);
       expect(client.invoiceCount).toBe(1);
@@ -1068,17 +1125,31 @@ describe("MajikBuwizClient", () => {
           accountId: activeKey.id,
           recipientContactIds: [externalContact.id],
         },
+        HistorySources.MCP,
       );
 
       expect(result).toBeInstanceOf(MajikInvoice);
       expect(result.id).toBe(original.id);
       expect(result.updatedAt).not.toBe(original.updatedAt);
       expect(await client.getInvoice(result.id)).toBe(result);
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === result.id &&
+              entry.historyType === HistoryTypes.SIGN,
+          )?.source,
+      ).toBe(HistorySources.MCP);
     });
 
     it("restarts a real signed-only invoice", async () => {
       const original = await createStoredInvoice(client, { signed: true });
-      const restarted = await client.restartInvoice(original);
+      const restarted = await client.restartInvoice(
+        original,
+        undefined,
+        HistorySources.CLI,
+      );
 
       expect(restarted).toBeInstanceOf(MajikInvoice);
       expect(restarted.id).toBe(original.id);
@@ -1086,6 +1157,15 @@ describe("MajikBuwizClient", () => {
       expect(restarted.isSigned).toBe(false);
       expect(restarted.isSealed).toBe(false);
       expect(await client.getInvoice(restarted.id)).toBe(restarted);
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === restarted.id &&
+              entry.historyType === HistoryTypes.SIGN,
+          )?.source,
+      ).toBe(HistorySources.CLI);
     });
 
     it("returns the same invoice when switching to its current mode", async () => {
@@ -1101,22 +1181,46 @@ describe("MajikBuwizClient", () => {
         invoice,
         "encrypted-and-signed",
         [activeContact.id],
+        { dropSignatures: true },
+        HistorySources.SDK,
       );
 
       expect(switched.mode).toBe("encrypted-and-signed");
       expect(switched.isEncrypted).toBe(true);
       expect(await client.getInvoice(switched.id)).toBe(switched);
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === switched.id &&
+              entry.historyType === HistoryTypes.SIGN,
+          )?.source,
+      ).toBe(HistorySources.SDK);
     });
 
     it("signs an external real invoice without storing it", async () => {
       const externalInvoice = await createRealInvoice();
       expect(externalInvoice.isSigned).toBe(false);
 
-      const signed = await client.signExternalInvoice(externalInvoice);
+      const signed = await client.signExternalInvoice(
+        externalInvoice,
+        undefined,
+        HistorySources.CLI,
+      );
 
       expect(signed.isSigned).toBe(true);
       expect(signed.id).toBe(externalInvoice.id);
       expect(await client.getInvoice(signed.id)).toBeUndefined();
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === signed.id &&
+              entry.historyType === HistoryTypes.SIGN,
+          )?.source,
+      ).toBe(HistorySources.CLI);
     });
 
     it("unlocks a real encrypted invoice and returns a decrypted instance", async () => {
@@ -1147,12 +1251,23 @@ describe("MajikBuwizClient", () => {
         original,
         updatedDraft as any,
         [activeContact.id],
+        undefined,
+        HistorySources.SDK,
       );
 
       expect(result.id).toBe(original.id);
       expect(result.isSigned).toBe(true);
       expect(result.hash).not.toBe(original.hash);
       expect(await client.getInvoice(result.id)).toBe(result);
+      expect(
+        client.historyManager
+          .listByFingerprint(activeKey.fingerprint)
+          .find(
+            (entry) =>
+              entry.reference_id === result.id &&
+              entry.historyType === HistoryTypes.SIGN,
+          )?.source,
+      ).toBe(HistorySources.SDK);
     });
   });
 

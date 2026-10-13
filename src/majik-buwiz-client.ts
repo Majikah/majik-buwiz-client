@@ -1602,6 +1602,7 @@ export class MajikBuwizClient extends MajikKeyClient<
       expectedSigners?: ExpectedSigner[];
       skipStore?: boolean;
     },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     return this._withSigningKey(
       options?.accountId,
@@ -1632,7 +1633,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: invoice.id,
           historyType: HistoryTypes.CREATE,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: invoice.id,
             detached: false,
@@ -1646,7 +1647,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: invoice.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: invoice.id,
             detached: false,
@@ -1809,6 +1810,7 @@ export class MajikBuwizClient extends MajikKeyClient<
       expectedSigners?: ExpectedSigner[];
       timestamp?: string;
     },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     const invoice = await this._resolveInvoice(invoiceOrId);
     return this._withSigningKey(
@@ -1825,7 +1827,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: signed.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: signed.id,
             detached: false,
@@ -1898,6 +1900,7 @@ export class MajikBuwizClient extends MajikKeyClient<
       expectedSigners?: ExpectedSigner[];
       timestamp?: string;
     },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     return this._withSigningKey(
       options?.accountId,
@@ -1911,7 +1914,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: signed.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: signed.id,
             detached: false,
@@ -1935,6 +1938,7 @@ export class MajikBuwizClient extends MajikKeyClient<
   async sealInvoice(
     invoiceOrId: string | MajikInvoice,
     options?: { accountId?: string; timestamp?: string },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     const invoice = await this._resolveInvoice(invoiceOrId);
     return this._withSigningKey(
@@ -1950,7 +1954,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: sealed.id,
           historyType: HistoryTypes.SEAL,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: sealed.id,
             detached: false,
@@ -2201,6 +2205,7 @@ export class MajikBuwizClient extends MajikKeyClient<
       accountId?: string;
       recipientContactIds?: string[];
     },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     const original = await this._resolveInvoice(invoiceOrId);
     return this._withSigningKey(
@@ -2229,7 +2234,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: withFreshCache.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: withFreshCache.id,
             detached: false,
@@ -2255,6 +2260,7 @@ export class MajikBuwizClient extends MajikKeyClient<
     options?: {
       accountId?: string;
     },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     const original = await this._resolveInvoice(invoiceOrId);
     return this._withSigningKey(
@@ -2278,7 +2284,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: newInvoice.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: newInvoice.id,
             detached: false,
@@ -2462,6 +2468,7 @@ export class MajikBuwizClient extends MajikKeyClient<
     updatedDraft: GeneralInvoice,
     recipientContactIds: string[],
     options?: { accountId?: string },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     return this._withSigningKey(
       options?.accountId,
@@ -2492,7 +2499,7 @@ export class MajikBuwizClient extends MajikKeyClient<
           reference_id: withFreshCache.id,
           historyType: HistoryTypes.SIGN,
           status: HistoryStatuses.SUCCESS,
-          source: HistorySources.SYSTEM,
+          source,
           operation: {
             reference_id: withFreshCache.id,
             detached: false,
@@ -2636,6 +2643,7 @@ export class MajikBuwizClient extends MajikKeyClient<
     newMode: MajikInvoiceMode,
     recipientContactIds?: string[],
     options?: { accountId?: string; dropSignatures?: boolean },
+    source: HistorySource = HistorySources.SYSTEM,
   ): Promise<MajikInvoice> {
     // if (invoice.isSealed) {
     //   throw new MajikInvoiceError("Cannot switch mode on a sealed invoice.");
@@ -2696,7 +2704,7 @@ export class MajikBuwizClient extends MajikKeyClient<
             reference_id: finalInvoice.id,
             historyType: HistoryTypes.SIGN,
             status: HistoryStatuses.SUCCESS,
-            source: HistorySources.SYSTEM,
+            source,
             operation: {
               reference_id: finalInvoice.id,
               detached: false,
